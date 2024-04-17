@@ -25,11 +25,12 @@
 "ANNEAL_LR": True
 
 # WandB Params
-"WANDB_MODE": "disabled"
-"ENTITY": ""
-"PROJECT": ""
+WANDB_MODE: run
+ENTITY: ""
+PROJECT: waymax_saphne
 
 # DO NOT CHANGE THESE. They will be set automatically in the code.
 NUM_ACTORS: -1
 MINIBATCH_SIZE: -1
 NUM_UPDATES: -1
+exp_dir: ""

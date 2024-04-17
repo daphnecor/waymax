@@ -1,4 +1,6 @@
 outputs/*
+wandb/*
+saves/*
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

@@ -1,23 +1,27 @@
 """
 Based on PureJaxRL Implementation of IPPO, with changes to give a centralised critic.
 """
-import chex
 import dataclasses
+from functools import partial
+import os
+from typing import Sequence, NamedTuple, Any, Tuple, Union, Dict
+
+import chex
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
+from flax.linen.initializers import constant, orthogonal
+from flax.training import orbax_utils
 import numpy as np
 import optax
-from flax.linen.initializers import constant, orthogonal
-from typing import Sequence, NamedTuple, Any, Tuple, Union, Dict
+import orbax
 import wandb
 import functools
 from flax.training.train_state import TrainState
 import distrax
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from functools import partial
 
 from rl.environments.spaces import Box
 from rl.environments.multi_agent_env import MultiAgentEnv
@@ -699,22 +703,44 @@ def make_train(config):
 
     return train
 
+    
+def get_exp_dir(config):
+    exp_dir = os.path.join(
+        'saves',
+        f"{config.SEED}"
+    )
+    return exp_dir
+
+    
+def init_config(config):
+    config.exp_dir = get_exp_dir(config)
+
+
 @hydra.main(version_base=None, config_path="config", config_name="mappo_homogenous_rnn_waymax")
 def main(config):
 
-    # config = OmegaConf.to_container(config)
+    init_config(config)
+    os.makedirs(config.exp_dir, exist_ok=True)
 
-    wandb.init(
-        entity=config.ENTITY,
+    run = wandb.init(
+        # entity=config.ENTITY,
         project=config.PROJECT,
         tags=["MAPPO", "RNN", config.MAP_NAME],
         config=OmegaConf.to_container(config),
         mode=config.WANDB_MODE,
+        dir=config.exp_dir
     )
     rng = jax.random.PRNGKey(config.SEED)
     with jax.disable_jit(False):
         train_jit = jax.jit(make_train(config)) 
         out = train_jit(rng)
+
+    runner_state = out["runner_state"]
+
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    save_args = orbax_utils.save_args_from_target(runner_state)
+    ckpts_dir = os.path.join(config.exp_dir, "ckpts")
+    orbax_checkpointer.save(ckpts_dir, runner_state, save_args=save_args)
 
     
 if __name__=="__main__":
