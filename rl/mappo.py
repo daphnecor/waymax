@@ -22,6 +22,7 @@ from flax.training.train_state import TrainState
 import distrax
 import hydra
 from omegaconf import DictConfig, OmegaConf
+from time import perf_counter
 
 from rl.environments.spaces import Box
 from rl.environments.multi_agent_env import MultiAgentEnv
@@ -35,153 +36,7 @@ from waymax import agents
 from waymax import visualization
 from waymax.datatypes.action import Action
 from waymax.datatypes.simulator_state import SimulatorState
-
-
-class WaymaxWrapper(JaxMARLWrapper):
-    """
-    Provides a `"world_state"` observation for the centralised critic.
-    world state observation of dimension: (num_agents, world_state_size)    
-    """
-    
-    def __init__(self,
-                 env: _env.MultiAgentEnvironment,
-                 obs_with_agent_id=True,
-                 ):
-        super().__init__(env)
-        self.num_agents = self._env.config.max_num_objects
-        self.obs_with_agent_id = obs_with_agent_id
-        self.agents = [
-            f'object_{i}' for i in range(self.num_agents)
-        ]
-        
-        self._state_size = 6
-        self.world_state_fn = self.ws_just_env_state
-
-        if not self.obs_with_agent_id:
-            self._world_state_size = self._state_size * self.num_agents
-            self.world_state_fn = self.ws_just_env_state
-        else:
-            self._world_state_size = self._state_size * self.num_agents + self.num_agents
-            self.world_state_fn = self.ws_with_agent_id
-
-        self.observation_spaces = {
-            i: Box(low=-1, high=1.0, shape=(self._state_size * self.num_agents + self.num_agents,)) for i in self.agents
-        }
-        self.action_spaces = {
-            i: Box(low=-1, high=1.0, shape=(2,)) for i in self.agents 
-        }
-
-
-    def observation_space(self, agent: str):
-        """Observation space for a given agent."""
-        return self.observation_spaces[agent]
-
-    def action_space(self, agent: str):
-        """Action space for a given agent."""
-        return self.action_spaces[agent]
-
-    @partial(jax.jit, static_argnums=0)
-    def get_obs(env, env_state):
-        traj = datatypes.dynamic_index(
-            env_state.sim_trajectory, env_state.timestep, axis=-1, keepdims=True
-        )
-        world_state = jnp.concatenate(
-        (traj.xy, traj.yaw[..., None], traj.vel_x[..., None], traj.vel_y[..., None], traj.vel_yaw[..., None]), axis=-1
-        )[:, 0]
-        agent_ids = jnp.eye(env.num_agents)
-        obs = {
-            agent: jnp.concatenate((world_state, agent_ids[i][..., None]), axis=-1)
-            for i, agent in enumerate(env.agents)
-        }
-        obs.update(
-            {
-                "world_state": world_state[None].repeat(env.num_agents, axis=0)
-            }
-        )
-        return obs
-        
-
-    def get_avail_actions(self, env_state):
-        return {
-            agent: jnp.ones((2,)) for agent in self.agents
-        }
-
-    
-    @partial(jax.jit, static_argnums=0)
-    def reset(self,
-              scenario,
-              key):
-        env_state = self._env.reset(scenario, key)
-        obs = self.get_obs(env_state)
-        # obs["world_state"] = self.world_state_fn(obs, env_state)
-        return obs, env_state
-    
-    @partial(jax.jit, static_argnums=(0,))
-    def step(
-        self,
-        key: chex.PRNGKey,
-        state: SimulatorState,
-        actions: Dict[str, chex.Array],
-        scenario
-    ) -> Tuple[Dict[str, chex.Array], SimulatorState, Dict[str, float], Dict[str, bool], Dict]:
-        """Performs step transitions in the environment."""
-
-        # key, key_reset = jax.random.split(key)
-        obs_st, states_st, rewards, dones, infos = self.step_env(state, actions)
-
-        rewards = {agent: rewards[i] for i, agent in enumerate(self.agents)}
-
-        obs_re, states_re = self.reset(scenario, key)
-
-        # Auto-reset environment based on termination
-        states = jax.tree_map(
-            lambda x, y: jax.lax.select(dones["__all__"], x, y), states_re, states_st
-        )
-        obs = jax.tree_map(
-            lambda x, y: jax.lax.select(dones["__all__"], x, y), obs_re, obs_st
-        )
-        return obs, states, rewards, dones, infos
-
-    @partial(jax.jit, static_argnums=0)
-    def step_env(self, state, action):
-        data = jnp.stack([action[agent] for agent in self.agents])
-        traj = datatypes.dynamic_index(
-                state.sim_trajectory, state.timestep, axis=-1, keepdims=True
-        )
-
-        # TODO: Is this right?
-        valid = traj.valid
-
-        action = Action(data=data, valid=valid)
-        reward = self._env.reward(state, action)
-        env_state = self._env.step(state, action)
-        obs = self.get_obs(env_state)
-        info = {}
-        obs = self.get_obs(env_state)
-        done = {'__all__': env_state.is_done}
-        done.update(
-            {agent: valid_i for agent, valid_i in zip(self.agents, valid)}
-        )
-        return obs, env_state, reward, done, info
-
-    @partial(jax.jit, static_argnums=0)
-    def ws_just_env_state(self, obs, state):
-        #return all_obs
-        world_state = obs["world_state"]
-        world_state = world_state[None].repeat(self._env.num_allies, axis=0)
-        return world_state
-        
-    @partial(jax.jit, static_argnums=0)
-    def ws_with_agent_id(self, obs, state):
-        #all_obs = jnp.array([obs[agent] for agent in self._env.agents])
-        world_state = obs["world_state"]
-        world_state = world_state[None].repeat(self._env.num_allies, axis=0)
-        one_hot = jnp.eye(self._env.num_allies)
-        return jnp.concatenate((world_state, one_hot), axis=1)
-        
-    def world_state_size(self):
-   
-        return self._world_state_size 
+from rl.wrappers.marl import WaymaxWrapper
 
 class ScannedRNN(nn.Module):
     @functools.partial(
@@ -210,8 +65,6 @@ class ScannedRNN(nn.Module):
         # Use a dummy key since the default state init fn is just zeros.
         cell = nn.GRUCell(features=hidden_size)
         return cell.initialize_carry(jax.random.PRNGKey(0), (batch_size, hidden_size))
-
-
 class ActorRNN(nn.Module):
     action_dim: Sequence[int]
     config: Dict
@@ -244,7 +97,6 @@ class ActorRNN(nn.Module):
 
 
         return hidden, pi
-
 
 class CriticRNN(nn.Module):
     config: Dict
@@ -298,15 +150,26 @@ max_num_objects = 32
 
 
 def make_train(config):
-    # scenario = map_name_to_scenario(config["MAP_NAME"])
-    # env = HeuristicEnemySMAX(scenario=scenario, **config["ENV_KWARGS"])
-
+    
+    t_start_up_start = perf_counter()
+   
+    # Configure dataset
+    t_data_iter_start = perf_counter()
     dataset_config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=max_num_objects)
     data_iter = dataloader.simulator_state_generator(config=dataset_config)
+    
+    t_data_iter_end = perf_counter()
+    
+    t_next_start = perf_counter()
+    
     scenario = next(data_iter)
+    
+    t_next_end = perf_counter() 
+    
     dynamics_model = dynamics.InvertibleBicycleModel()
 
-    env = _env.MultiAgentEnvironment(
+    # Create waymax environment
+    waymax_base_env = _env.MultiAgentEnvironment(
         dynamics_model=dynamics_model,
         config=dataclasses.replace(
             _config.EnvironmentConfig(),
@@ -314,8 +177,10 @@ def make_train(config):
             controlled_object=_config.ObjectType.VALID,
         ),
     )
-    env = WaymaxWrapper(env, obs_with_agent_id=False)
+    # Wrap environment with JAXMARL wrapper
+    env = WaymaxWrapper(waymax_base_env, obs_with_agent_id=False)
 
+    # Configure training
     config.NUM_ACTORS = env.num_agents * config.NUM_ENVS
     config.NUM_UPDATES = (
         config["TOTAL_TIMESTEPS"] // config.NUM_STEPS // config["NUM_ENVS"]
@@ -329,8 +194,16 @@ def make_train(config):
         else config["CLIP_EPS"]
     )
 
-    # env = SMAXWorldStateWrapper(env, config["OBS_WITH_AGENT_ID"])
+    # Wrap environment with LogWrapper
     env = WaymaxLogWrapper(env)
+    
+    t_start_up_end = perf_counter()
+    
+    print(f"--- TOTAL STARTUP COSTS (make data_iter + env) = {t_start_up_end - t_start_up_start} s ---")
+    print(f" of which \n")
+    print(f"--- DATA ITER COSTS = {t_data_iter_end - t_data_iter_start} s ---")
+    print(f"--- NEXT DATA ITER COSTS = {t_next_end - t_next_start} s ---")
+    
 
     def linear_schedule(count):
         frac = (
@@ -664,6 +537,11 @@ def make_train(config):
             rng = update_state[-1]
 
             def callback(metric):
+                
+                # Create a video
+                frames = env.render(scenario, waymax_base_env, dynamics_model)
+                # Video must be atleast 4 dimensions: time, channels, height, width
+                
                 wandb.log(
                     {
                         # the metrics have an agent dimension, but this is identical
@@ -678,6 +556,7 @@ def make_train(config):
                         * config["NUM_ENVS"]
                         * config["NUM_STEPS"],
                         **metric["loss"],
+                        "video": wandb.Video(frames, fps=10, format="gif"),
                     }
                 )
             
@@ -725,7 +604,7 @@ def main(config):
     run = wandb.init(
         # entity=config.ENTITY,
         project=config.PROJECT,
-        tags=["MAPPO", "RNN", config.MAP_NAME],
+        tags=["MAPPO", config.MAP_NAME],
         config=OmegaConf.to_container(config),
         mode=config.WANDB_MODE,
         dir=config.exp_dir
