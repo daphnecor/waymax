@@ -1,5 +1,6 @@
-wandb
-gymnax
-seaborn
 distrax
+gymnax
 hydra-core
+safetensors
+seaborn
+wandb

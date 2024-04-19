@@ -1,3 +1,12 @@
+```
+conda create -n waymax python=3.10
+conda activate waymax
+pip install -e .
+pip install -r requirements.txt
+python rl/mappo.py
+```
+
+
 # Waymax: An accelerated simulator for autonomous driving research.
 
 ![Continuous integration](https://github.com/waymo-research/waymax/actions/workflows/ci-build.yml/badge.svg)

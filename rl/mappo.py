@@ -4,6 +4,7 @@ Based on PureJaxRL Implementation of IPPO, with changes to give a centralised cr
 import dataclasses
 from functools import partial
 import os
+import shutil
 from typing import Sequence, NamedTuple, Any, Tuple, Union, Dict
 
 import chex
@@ -12,10 +13,10 @@ import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
 from flax.linen.initializers import constant, orthogonal
-from flax.training import orbax_utils
+# from flax.training import orbax_utils
 import numpy as np
 import optax
-import orbax
+import orbax.checkpoint as ocp
 import wandb
 import functools
 from flax.training.train_state import TrainState
@@ -37,6 +38,17 @@ from waymax import visualization
 from waymax.datatypes.action import Action
 from waymax.datatypes.simulator_state import SimulatorState
 from rl.wrappers.marl import WaymaxWrapper
+
+
+@struct.dataclass
+class RunnerState:
+    train_states: Tuple[TrainState, TrainState]
+    env_state: MultiAgentEnv
+    last_obs: Dict[str, jnp.ndarray]
+    last_done: jnp.ndarray
+    hstates: Tuple[jnp.ndarray, jnp.ndarray]
+    rng: jnp.ndarray
+
 
 class ScannedRNN(nn.Module):
     @functools.partial(
@@ -65,6 +77,8 @@ class ScannedRNN(nn.Module):
         # Use a dummy key since the default state init fn is just zeros.
         cell = nn.GRUCell(features=hidden_size)
         return cell.initialize_carry(jax.random.PRNGKey(0), (batch_size, hidden_size))
+
+
 class ActorRNN(nn.Module):
     action_dim: Sequence[int]
     config: Dict
@@ -95,8 +109,8 @@ class ActorRNN(nn.Module):
         actor_logtstd = self.param('log_std', nn.initializers.zeros, (self.action_dim,))
         pi = distrax.MultivariateNormalDiag(actor_mean, jnp.exp(actor_logtstd))
 
-
         return hidden, pi
+
 
 class CriticRNN(nn.Module):
     config: Dict
@@ -121,6 +135,7 @@ class CriticRNN(nn.Module):
         )
         
         return hidden, jnp.squeeze(critic, axis=-1)
+
 
 class Transition(NamedTuple):
     global_done: jnp.ndarray
@@ -149,7 +164,7 @@ def unbatchify(x: jnp.ndarray, agent_list, num_envs, num_actors):
 max_num_objects = 32
 
 
-def make_train(config):
+def make_train(config, checkpoint_manager):
     
     t_start_up_start = perf_counter()
    
@@ -180,6 +195,9 @@ def make_train(config):
     # Wrap environment with JAXMARL wrapper
     env = WaymaxWrapper(waymax_base_env, obs_with_agent_id=False)
 
+    # Wrap environment with LogWrapper
+    env = WaymaxLogWrapper(env)
+
     # Configure training
     config.NUM_ACTORS = env.num_agents * config.NUM_ENVS
     config.NUM_UPDATES = (
@@ -193,10 +211,7 @@ def make_train(config):
         if config["SCALE_CLIP_EPS"]
         else config["CLIP_EPS"]
     )
-
-    # Wrap environment with LogWrapper
-    env = WaymaxLogWrapper(env)
-    
+ 
     t_start_up_end = perf_counter()
     
     print(f"--- TOTAL STARTUP COSTS (make data_iter + env) = {t_start_up_end - t_start_up_start} s ---")
@@ -268,13 +283,36 @@ def make_train(config):
         ac_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], 128)
         cr_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], 128)
 
+        rng, _rng = jax.random.split(rng)
+        runner_state = RunnerState(
+            (actor_train_state, critic_train_state),
+            env_state,
+            obsv,
+            jnp.zeros((config.NUM_ACTORS), dtype=bool),
+            (ac_init_hstate, cr_init_hstate),
+            _rng,
+        )
+
+        latest_update_step = checkpoint_manager.latest_step()
+        latest_update_step = 0 if latest_update_step is None else latest_update_step
+
+        try:
+            breakpoint()
+            runner_state = checkpoint_manager.restore(latest_update_step, args=ocp.args.StandardRestore(runner_state))
+        except FileNotFoundError:
+            pass
+
         # TRAIN LOOP
         def _update_step(update_runner_state, unused):
             # COLLECT TRAJECTORIES
             runner_state, update_steps = update_runner_state
             
-            def _env_step(runner_state, unused):
-                train_states, env_state, last_obs, last_done, hstates, rng = runner_state
+            def _env_step(runner_state: RunnerState, unused):
+                train_states, env_state, last_obs, last_done, hstates, rng = (runner_state.train_states,
+                                                                              runner_state.env_state,
+                                                                              runner_state.last_obs,
+                                                                              runner_state.last_done,
+                                                                              runner_state.hstates, runner_state.rng)
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -315,7 +353,7 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(
                     env.step, in_axes=(0, 0, 0, None)
                 )(rng_step, env_state, env_act, scenario)
-                info = jax.tree_map(lambda x: x.reshape((config["NUM_ACTORS"])), info)
+                info = jax.tree.map(lambda x: x.reshape((config["NUM_ACTORS"])), info)
                 done_batch = batchify(done, env.agents, config["NUM_ACTORS"]).squeeze()
                 transition = Transition(
                     jnp.tile(done["__all__"], env.num_agents),
@@ -329,16 +367,20 @@ def make_train(config):
                     info,
                     avail_actions,
                 )
-                runner_state = (train_states, env_state, obsv, done_batch, (ac_hstate, cr_hstate), rng)
+                runner_state = RunnerState(train_states, env_state, obsv, done_batch, (ac_hstate, cr_hstate), rng)
                 return runner_state, transition
 
-            initial_hstates = runner_state[-2]
+            initial_hstates = runner_state.hstates
             runner_state, traj_batch = jax.lax.scan(
                 _env_step, runner_state, None, config["NUM_STEPS"]
             )
             
             # CALCULATE ADVANTAGE
-            train_states, env_state, last_obs, last_done, hstates, rng = runner_state
+            train_states, env_state, last_obs, last_done, hstates, rng = (runner_state.train_states,
+                                                                            runner_state.env_state,
+                                                                            runner_state.last_obs,
+                                                                            runner_state.last_done,
+                                                                            runner_state.hstates, runner_state.rng)
             
             last_world_state = last_obs["world_state"].swapaxes(0,1)
             last_world_state = last_world_state.reshape((config["NUM_ACTORS"],-1))
@@ -467,7 +509,7 @@ def make_train(config):
                 ) = update_state
                 rng, _rng = jax.random.split(rng)
 
-                init_hstates = jax.tree_map(lambda x: jnp.reshape(
+                init_hstates = jax.tree.map(lambda x: jnp.reshape(
                     x, (1, config["NUM_ACTORS"], -1)
                 ), init_hstates)
                 
@@ -503,7 +545,7 @@ def make_train(config):
                 )
                 update_state = (
                     train_states,
-                    jax.tree_map(lambda x: x.squeeze(), init_hstates),
+                    jax.tree.map(lambda x: x.squeeze(), init_hstates),
                     traj_batch,
                     advantages,
                     targets,
@@ -523,11 +565,11 @@ def make_train(config):
                 _update_epoch, update_state, None, config["UPDATE_EPOCHS"]
             )
             loss_info["ratio_0"] = loss_info["ratio"].at[0,0].get()
-            loss_info = jax.tree_map(lambda x: x.mean(), loss_info)
+            loss_info = jax.tree.map(lambda x: x.mean(), loss_info)
             
             train_states = update_state[0]
             metric = traj_batch.info
-            metric = jax.tree_map(
+            metric = jax.tree.map(
                 lambda x: x.reshape(
                     (config["NUM_STEPS"], config["NUM_ENVS"], env.num_agents)
                 ),
@@ -539,9 +581,9 @@ def make_train(config):
             def callback(metric):
                 
                 # Create a video
-                frames = env.render(scenario, waymax_base_env, dynamics_model)
+                # frames = env.render(scenario, waymax_base_env, dynamics_model)
                 # Video must be atleast 4 dimensions: time, channels, height, width
-                
+
                 wandb.log(
                     {
                         # the metrics have an agent dimension, but this is identical
@@ -556,27 +598,31 @@ def make_train(config):
                         * config["NUM_ENVS"]
                         * config["NUM_STEPS"],
                         **metric["loss"],
-                        "video": wandb.Video(frames, fps=10, format="gif"),
+                        # "video": wandb.Video(frames, fps=10, format="gif"),
                     }
                 )
+
+            def ckpt_callback(metric, runner_state):
+                try:
+                    curr_update_step = metric["update_steps"]
+                    save_checkpoint(config, checkpoint_manager, runner_state, curr_update_step)
+                except jax.errors.ConcretizationTypeError:
+                    breakpoint()
+                    return
             
             metric["update_steps"] = update_steps
             jax.experimental.io_callback(callback, None, metric)
             update_steps = update_steps + 1
-            runner_state = (train_states, env_state, last_obs, last_done, hstates, rng)
+            runner_state = RunnerState(train_states, env_state, last_obs, last_done, hstates, rng)
+            jax.lax.cond(
+                update_steps % config.ckpt_freq == 0,
+                partial(jax.experimental.io_callback, ckpt_callback, None, metric, runner_state),
+                lambda: None,
+            )
             return (runner_state, update_steps), metric
 
-        rng, _rng = jax.random.split(rng)
-        runner_state = (
-            (actor_train_state, critic_train_state),
-            env_state,
-            obsv,
-            jnp.zeros((config.NUM_ACTORS), dtype=bool),
-            (ac_init_hstate, cr_init_hstate),
-            _rng,
-        )
         runner_state, metric = jax.lax.scan(
-            _update_step, (runner_state, 0), None, config.NUM_UPDATES
+            _update_step, (runner_state, latest_update_step), None, config.NUM_UPDATES - latest_update_step
         )
         return {"runner_state": runner_state}
 
@@ -590,15 +636,34 @@ def get_exp_dir(config):
     )
     return exp_dir
 
+
+def get_ckpt_dir(config):
+    ckpts_dir = os.path.abspath(os.path.join(config.exp_dir, "ckpts"))
+    return ckpts_dir
+
     
 def init_config(config):
     config.exp_dir = get_exp_dir(config)
+    config.ckpt_dir = get_ckpt_dir(config)
+
+    
+def save_checkpoint(config, ckpt_manager, runner_state, t):
+    ckpt_manager.save(t.item(), args=ocp.args.StandardSave(runner_state))
+    ckpt_manager.wait_until_finished()
+    breakpoint()
 
 
 @hydra.main(version_base=None, config_path="config", config_name="mappo_homogenous_rnn_waymax")
 def main(config):
-
     init_config(config)
+    if config.overwrite:
+        shutil.rmtree(config.exp_dir, ignore_errors=True)
+
+    options = ocp.CheckpointManagerOptions(
+        max_to_keep=2, create=True)
+    checkpoint_manager = ocp.CheckpointManager(
+        config.ckpt_dir, options=options)
+
     os.makedirs(config.exp_dir, exist_ok=True)
 
     run = wandb.init(
@@ -611,15 +676,12 @@ def main(config):
     )
     rng = jax.random.PRNGKey(config.SEED)
     with jax.disable_jit(False):
-        train_jit = jax.jit(make_train(config)) 
+        train_jit = jax.jit(make_train(config, checkpoint_manager)) 
         out = train_jit(rng)
 
     runner_state = out["runner_state"]
-
-    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    save_args = orbax_utils.save_args_from_target(runner_state)
-    ckpts_dir = os.path.join(config.exp_dir, "ckpts")
-    orbax_checkpointer.save(ckpts_dir, runner_state, save_args=save_args)
+    n_updates = runner_state[-1]
+    runner_state: RunnerState = runner_state[0]
 
     
 if __name__=="__main__":
