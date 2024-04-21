@@ -20,14 +20,15 @@ import orbax.checkpoint as ocp
 import wandb
 import functools
 from flax.training.train_state import TrainState
-import distrax
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from time import perf_counter
 
 from rl.environments.spaces import Box
 from rl.environments.multi_agent_env import MultiAgentEnv
+from rl.model import ActorRNN, CriticRNN
 from rl.wrappers.baselines import JaxMARLWrapper, LogWrapper, WaymaxLogWrapper
+from utils import RunnerState, batchify, init_or_restore_run, unbatchify
 from waymax import config as _config
 from waymax import dataloader
 from waymax import datatypes
@@ -38,103 +39,6 @@ from waymax import visualization
 from waymax.datatypes.action import Action
 from waymax.datatypes.simulator_state import SimulatorState
 from rl.wrappers.marl import WaymaxWrapper
-
-
-@struct.dataclass
-class RunnerState:
-    train_states: Tuple[TrainState, TrainState]
-    env_state: MultiAgentEnv
-    last_obs: Dict[str, jnp.ndarray]
-    last_done: jnp.ndarray
-    hstates: Tuple[jnp.ndarray, jnp.ndarray]
-    rng: jnp.ndarray
-
-
-class ScannedRNN(nn.Module):
-    @functools.partial(
-        nn.scan,
-        variable_broadcast="params",
-        in_axes=0,
-        out_axes=0,
-        split_rngs={"params": False},
-    )
-    @nn.compact
-    def __call__(self, carry, x):
-        """Applies the module."""
-        rnn_state = carry
-        ins, resets = x
-        #print('ins', ins)
-        rnn_state = jnp.where(
-            resets[:, np.newaxis],
-            self.initialize_carry(ins.shape[0], ins.shape[1]),
-            rnn_state,
-        )
-        new_rnn_state, y = nn.GRUCell(features=ins.shape[1])(rnn_state, ins)
-        return new_rnn_state, y
-
-    @staticmethod
-    def initialize_carry(batch_size, hidden_size):
-        # Use a dummy key since the default state init fn is just zeros.
-        cell = nn.GRUCell(features=hidden_size)
-        return cell.initialize_carry(jax.random.PRNGKey(0), (batch_size, hidden_size))
-
-
-class ActorRNN(nn.Module):
-    action_dim: Sequence[int]
-    config: Dict
-
-    @nn.compact
-    def __call__(self, hidden, x):
-        obs, dones, avail_actions = x
-        embedding = nn.Dense(
-            self.config["FC_DIM_SIZE"], kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        embedding = nn.relu(embedding)
-
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
-
-        actor_mean = nn.Dense(self.config["GRU_HIDDEN_DIM"], kernel_init=orthogonal(2), bias_init=constant(0.0))(
-            embedding
-        )
-        actor_mean = nn.relu(actor_mean)
-        actor_mean = nn.Dense(
-            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
-        )(actor_mean)
-        unavail_actions = 1 - avail_actions
-
-        # action_logits = actor_mean - (unavail_actions * 1e10)
-        # pi = distrax.Categorical(logits=action_logits)
-        actor_mean = actor_mean - (unavail_actions * 1e10)
-        actor_logtstd = self.param('log_std', nn.initializers.zeros, (self.action_dim,))
-        pi = distrax.MultivariateNormalDiag(actor_mean, jnp.exp(actor_logtstd))
-
-        return hidden, pi
-
-
-class CriticRNN(nn.Module):
-    config: Dict
-    
-    @nn.compact
-    def __call__(self, hidden, x):
-        world_state, dones = x
-        embedding = nn.Dense(
-            self.config["FC_DIM_SIZE"], kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(world_state)
-        embedding = nn.relu(embedding)
-        
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
-        
-        critic = nn.Dense(self.config["GRU_HIDDEN_DIM"], kernel_init=orthogonal(2), bias_init=constant(0.0))(
-            embedding
-        )
-        critic = nn.relu(critic)
-        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
-            critic
-        )
-        
-        return hidden, jnp.squeeze(critic, axis=-1)
 
 
 class Transition(NamedTuple):
@@ -148,29 +52,6 @@ class Transition(NamedTuple):
     world_state: jnp.ndarray
     info: jnp.ndarray
     avail_actions: jnp.ndarray
-
-
-def batchify(x: dict, agent_list, num_actors):
-    x = jnp.stack([x[a] for a in agent_list])
-    #print('batchify', x.shape)
-    return x.reshape((num_actors, -1))
-
-
-def unbatchify(x: jnp.ndarray, agent_list, num_envs, num_actors):
-    x = x.reshape((num_actors, num_envs, -1))
-    return {a: x[i] for i, a in enumerate(agent_list)}
-
-    
-max_num_objects = 32
-
-
-def linear_schedule(config, count):
-    frac = (
-        1.0
-        - (count // (config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"]))
-        / config["NUM_UPDATES"]
-    )
-    return config["LR"] * frac
 
 
 def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wandb_run_id):
@@ -325,6 +206,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                     avail_actions,
                 )
                 #print('env step ac in', ac_in)
+                breakpoint()
                 ac_hstate, pi = actor_network.apply(train_states[0].params, hstates[0], ac_in)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
@@ -646,139 +528,7 @@ def init_config(config):
     
 def save_checkpoint(config, ckpt_manager, runner_state, t):
     ckpt_manager.save(t.item(), args=ocp.args.StandardSave(runner_state))
-    ckpt_manager.wait_until_finished()
-
-    
-def init_or_restore_run(config, ckpt_manager, latest_update_step, rng):
-    t_start_up_start = perf_counter()
-   
-    # Configure dataset
-    t_data_iter_start = perf_counter()
-    dataset_config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=max_num_objects)
-    data_iter = dataloader.simulator_state_generator(config=dataset_config)
-    
-    t_data_iter_end = perf_counter()
-    
-    t_next_start = perf_counter()
-    
-    scenario = next(data_iter)
-    
-    t_next_end = perf_counter() 
-    
-    dynamics_model = dynamics.InvertibleBicycleModel()
-
-    # Create waymax environment
-    waymax_base_env = _env.MultiAgentEnvironment(
-        dynamics_model=dynamics_model,
-        config=dataclasses.replace(
-            _config.EnvironmentConfig(),
-            max_num_objects=max_num_objects,
-            controlled_object=_config.ObjectType.VALID,
-        ),
-    )
-    # Wrap environment with JAXMARL wrapper
-    env = WaymaxWrapper(waymax_base_env, obs_with_agent_id=False)
-
-    # Wrap environment with LogWrapper
-    env = WaymaxLogWrapper(env)
-
-    # Configure training
-    config.NUM_ACTORS = env.num_agents * config.NUM_ENVS
-    config.NUM_UPDATES = (
-        config["TOTAL_TIMESTEPS"] // config.NUM_STEPS // config["NUM_ENVS"]
-    )
-    config.MINIBATCH_SIZE = (
-        config["NUM_ACTORS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
-    )
-    config["CLIP_EPS"] = (
-        config["CLIP_EPS"] / env.num_agents
-        if config["SCALE_CLIP_EPS"]
-        else config["CLIP_EPS"]
-    )
- 
-    t_start_up_end = perf_counter()
-    
-    print(f"--- TOTAL STARTUP COSTS (make data_iter + env) = {t_start_up_end - t_start_up_start} s ---")
-    print(f" of which \n")
-    print(f"--- DATA ITER COSTS = {t_data_iter_end - t_data_iter_start} s ---")
-    print(f"--- NEXT DATA ITER COSTS = {t_next_end - t_next_start} s ---")
-
-    actor_network = ActorRNN(env.action_space(env.agents[0]).shape[0], config=config)
-    critic_network = CriticRNN(config=config)
-    rng, _rng_actor, _rng_critic = jax.random.split(rng, 3)
-    ac_init_x = (
-        jnp.zeros((1, config["NUM_ENVS"], env.observation_space(env.agents[0]).shape[0])),
-        jnp.zeros((1, config["NUM_ENVS"])),
-        jnp.zeros((1, config["NUM_ENVS"], env.action_space(env.agents[0]).shape[0])),
-    )
-    ac_init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], config["GRU_HIDDEN_DIM"])
-    actor_network_params = actor_network.init(_rng_actor, ac_init_hstate, ac_init_x)
-    cr_init_x = (
-        jnp.zeros((1, config["NUM_ENVS"], env.world_state_size(),)),  
-        jnp.zeros((1, config["NUM_ENVS"])),
-    )
-    cr_init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], config["GRU_HIDDEN_DIM"])
-    critic_network_params = critic_network.init(_rng_critic, cr_init_hstate, cr_init_x)
-
-    _linear_schedule = partial(linear_schedule, config)
-    
-    if config["ANNEAL_LR"]:
-        actor_tx = optax.chain(
-            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-            optax.adam(learning_rate=_linear_schedule, eps=1e-5),
-        )
-        critic_tx = optax.chain(
-            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-            optax.adam(learning_rate=_linear_schedule, eps=1e-5),
-        )
-    else:
-        actor_tx = optax.chain(
-            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-            optax.adam(config["LR"], eps=1e-5),
-        )
-        critic_tx = optax.chain(
-            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-            optax.adam(config["LR"], eps=1e-5),
-        )
-    actor_train_state = TrainState.create(
-        apply_fn=actor_network.apply,
-        params=actor_network_params,
-        tx=actor_tx,
-    )
-    critic_train_state = TrainState.create(
-        apply_fn=actor_network.apply,
-        params=critic_network_params,
-        tx=critic_tx,
-    )
-
-    # INIT ENV
-    rng, _rng = jax.random.split(rng)
-    reset_rng = jax.random.split(_rng, config.NUM_ENVS)
-    obsv, env_state = jax.vmap(env.reset, in_axes=(None, 0))(scenario, reset_rng)
-    ac_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], 128)
-    cr_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], 128)
-
-    rng, _rng = jax.random.split(rng)
-    runner_state = RunnerState(
-        (actor_train_state, critic_train_state),
-        env_state,
-        obsv,
-        jnp.zeros((config.NUM_ACTORS), dtype=bool, ),
-        (ac_init_hstate, cr_init_hstate),
-        _rng,
-    )
-
-    if ckpt_manager.latest_step() is not None:
-        runner_state = ckpt_manager.restore(latest_update_step, args=ocp.args.StandardRestore(runner_state))
-        wandb_resume = 'Must'
-        with open(os.path.join(config.exp_dir, "wandb_run_id.txt"), "r") as f:
-            wandb_run_id = f.read()
-    else:
-        wandb_resume = None
-        wandb_run_id = None
-
-    return runner_state, env, scenario, latest_update_step, wandb_run_id, wandb_resume
-    
+    ckpt_manager.wait_until_finished() 
 
 
 @hydra.main(version_base=None, config_path="config", config_name="mappo_homogenous_rnn_waymax")
@@ -794,7 +544,8 @@ def main(config):
 
     rng = jax.random.PRNGKey(config.SEED)
     latest_update_step = checkpoint_manager.latest_step()
-    runner_state, env, scenario, latest_update_step, wandb_run_id, wandb_resume = init_or_restore_run(config, checkpoint_manager, latest_update_step, rng)
+    runner_state, env, scenario, latest_update_step, wandb_run_id, wandb_resume = \
+        init_or_restore_run(config, checkpoint_manager, latest_update_step, rng)
     latest_update_step = 0 if latest_update_step is None else latest_update_step
 
     os.makedirs(config.exp_dir, exist_ok=True)

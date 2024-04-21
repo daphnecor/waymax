@@ -1,3 +1,7 @@
+defaults:
+  - config
+  - _self_
+
 LR: 0.002
 NUM_ENVS: 128
 NUM_STEPS: 128 
@@ -15,16 +19,11 @@ VF_COEF: 0.5
 MAX_GRAD_NORM: 0.25
 ACTIVATION: relu
 OBS_WITH_AGENT_ID: True
-ENV_NAME: HeuristicEnemySMAX
 MAP_NAME: 2s3z
 SEED: 0
-ENV_KWARGS: 
-  see_enemy_actions: True
-  walls_cause_death: True
-  attack_mode: closest
 ANNEAL_LR: False
 overwrite: False
-ckpt_freq: 1
+ckpt_freq: 50
 
 # WandB Params
 WANDB_MODE: run
@@ -37,3 +36,6 @@ MINIBATCH_SIZE: -1
 NUM_UPDATES: -1
 exp_dir: ""
 ckpt_dir: ""
+
+# DO NOT CHANGE THIS.
+max_num_objects: 32
