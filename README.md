@@ -1,11 +1,27 @@
+Set up your environment.
 ```
 conda create -n waymax python=3.10
 conda activate waymax
 pip install -e .
 pip install -r requirements.txt
+```
+
+Also install jax and jaxlib with CUDA support if applicable.
+
+To train:
+```
 python rl/mappo.py
 ```
 
+To render from a checkpoint:
+```
+python el/enjoy.py
+```
+
+In both of the above commands, you can overwrite the config parameters founc at in `rl/config`, e.g.
+```
+python rl/mappo.py SEED=27
+```
 
 # Waymax: An accelerated simulator for autonomous driving research.
 

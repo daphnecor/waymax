@@ -13,9 +13,8 @@ from waymax.agents import waypoint_following_agent
 
 def create_netty_actor(
     network: nn.Module,
-    dynamics_model: dynamics.DynamicsModel,
+    params,
     is_controlled_func: Callable[[datatypes.SimulatorState], jax.Array],
-    speed: Optional[float] = None,
 ) -> actor_core.WaymaxActorCore:
   """Creates an actor with constant speed without changing objects' heading.
 
@@ -27,11 +26,12 @@ def create_netty_actor(
     dynamics_model: The dynamics model the actor is using that defines the
       action output by the actor.
     is_controlled_func: Defines which objects are controlled by this actor.
-    speed: Speed of the actor, if None, speed from previous step is used.
 
   Returns:
     An statelss actor that drives the controlled objects with constant speed.
   """
+
+  # TODO: Initialize the environment here
 
   def select_action(  # pytype: disable=annotation-type-mismatch
       params: actor_core.Params,
@@ -49,14 +49,15 @@ def create_netty_actor(
         state.sim_trajectory, state.timestep, axis=-1, keepdims=True
     )
 
-    obs = jnp.concatenate(
-     (traj.xy, traj.yaw[..., None], traj.vel_x[..., None], traj.vel_y[..., None], traj.vel_yaw[..., None]), axis=-1
-    )[:, 0]
+    obs = env.get_obs(state)
 
-    action_array, _ = network.apply(params, obs)
-    action_array *= 100
+    # obs = jnp.concatenate(
+    #  (traj.xy, traj.yaw[..., None], traj.vel_x[..., None], traj.vel_y[..., None], traj.vel_yaw[..., None]), axis=-1
+    # )[:, 0]
 
-    actions = datatypes.Action(data=action_array, valid=traj.valid)
+    hidden, pi = network.apply(params, obs)
+
+    actions = datatypes.Action(data=pi, valid=traj.valid)
 
     # Note here actions' valid could be different from is_controlled, it happens
     # when that object does not have valid trajectory from the previous
@@ -72,7 +73,7 @@ def create_netty_actor(
   return actor_core.actor_core_factory(
       init=lambda rng, init_state: None,
       select_action=_select_action,
-      name=f'constant_speed_{speed}',
+      name=f'netty_actor',
   )
 
 

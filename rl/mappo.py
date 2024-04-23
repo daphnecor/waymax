@@ -24,11 +24,12 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from time import perf_counter
 
+from rl.config.config import Config
 from rl.environments.spaces import Box
 from rl.environments.multi_agent_env import MultiAgentEnv
-from rl.model import ActorRNN, CriticRNN
-from rl.wrappers.baselines import JaxMARLWrapper, LogWrapper, WaymaxLogWrapper
-from utils import RunnerState, batchify, init_or_restore_run, unbatchify
+from rl.model import ActorRNN, CriticRNN, ScannedRNN
+from rl.wrappers.baselines import JaxMARLWrapper, LogWrapper
+from utils import RunnerState, batchify, init_config, init_or_restore_run, make_sim_render_episode, render_callback, save_checkpoint, unbatchify
 from waymax import config as _config
 from waymax import dataloader
 from waymax import datatypes
@@ -38,7 +39,7 @@ from waymax import agents
 from waymax import visualization
 from waymax.datatypes.action import Action
 from waymax.datatypes.simulator_state import SimulatorState
-from rl.wrappers.marl import WaymaxWrapper
+from rl.wrappers.marl import WaymaxWrapper, WaymaxLogWrapper
 
 
 class Transition(NamedTuple):
@@ -55,7 +56,8 @@ class Transition(NamedTuple):
 
 
 def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wandb_run_id):
-    
+    _render_callback = partial(render_callback, save_dir=config.vid_dir)
+
     # t_start_up_start = perf_counter()
    
     # # Configure dataset
@@ -108,7 +110,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
     # print(f" of which \n")
     # print(f"--- DATA ITER COSTS = {t_data_iter_end - t_data_iter_start} s ---")
     # print(f"--- NEXT DATA ITER COSTS = {t_next_end - t_next_start} s ---")
-    
+ 
 
     def train(rng, runner_state=None):
 
@@ -122,6 +124,12 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
         # INIT NETWORK
         actor_network = ActorRNN(env.action_space(env.agents[0]).shape[0], config=config)
         critic_network = CriticRNN(config=config)
+
+        jit_sim_render_episode = make_sim_render_episode(config, actor_network, env, scenario)
+        num_render_actors = 1 * env.num_agents
+        ac_init_hstate_render = ScannedRNN.initialize_carry(num_render_actors, 128)
+        render_states = jit_sim_render_episode(runner_state.train_states[0].params, ac_init_hstate_render)
+        jax.experimental.io_callback(_render_callback, None, states=render_states, t=0)
 
         # if runner_state is None:
         #     rng, _rng_actor, _rng_critic = jax.random.split(rng, 3)
@@ -163,8 +171,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
         #         apply_fn=actor_network.apply,
         #         params=actor_network_params,
         #         tx=actor_tx,
-        #     )
-        #     critic_train_state = TrainState.create(
+        #     ) itic_train_state = TrainState.create(
         #         apply_fn=actor_network.apply,
         #         params=critic_network_params,
         #         tx=critic_tx,
@@ -182,7 +189,8 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
         #     )
 
         # TRAIN LOOP
-        def _update_step(update_runner_state, unused):
+        # def _update_step(update_runner_state, unused):
+        def _update_step_with_render(update_runner_state, unused, render_states):
             # COLLECT TRAJECTORIES
             runner_state, update_steps = update_runner_state
             
@@ -206,7 +214,6 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                     avail_actions,
                 )
                 #print('env step ac in', ac_in)
-                breakpoint()
                 ac_hstate, pi = actor_network.apply(train_states[0].params, hstates[0], ac_in)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
@@ -493,6 +500,17 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
             jax.experimental.io_callback(callback, None, metric)
             update_steps = update_steps + 1
             runner_state = RunnerState(train_states, env_state, last_obs, last_done, hstates, rng)
+            do_render = update_steps % config.render_freq == 0
+            render_states = jax.lax.cond(
+                do_render,
+                partial(jit_sim_render_episode, runner_state.train_states[0].params, ac_init_hstate_render),
+                lambda: render_states,
+            )
+            jax.lax.cond(
+                do_render,
+                partial(jax.experimental.io_callback, _render_callback, None, states=render_states, t=update_steps),
+                lambda: None,
+            )
             jax.lax.cond(
                 update_steps % config.ckpt_freq == 0,
                 partial(jax.experimental.io_callback, ckpt_callback, None, metric, runner_state),
@@ -500,39 +518,20 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
             )
             return (runner_state, update_steps), metric
 
+        _update_step = functools.partial(_update_step_with_render, render_states=render_states)
+
         runner_state, metric = jax.lax.scan(
-            _update_step, (runner_state, latest_update_step), None, config.NUM_UPDATES - latest_update_step
+            _update_step, 
+            # _update_step, 
+            (runner_state, latest_update_step), None, config.NUM_UPDATES - latest_update_step
         )
         return {"runner_state": runner_state}
 
     return train
 
     
-def get_exp_dir(config):
-    exp_dir = os.path.join(
-        'saves',
-        f"{config.SEED}"
-    )
-    return exp_dir
-
-
-def get_ckpt_dir(config):
-    ckpts_dir = os.path.abspath(os.path.join(config.exp_dir, "ckpts"))
-    return ckpts_dir
-
-    
-def init_config(config):
-    config.exp_dir = get_exp_dir(config)
-    config.ckpt_dir = get_ckpt_dir(config)
-
-    
-def save_checkpoint(config, ckpt_manager, runner_state, t):
-    ckpt_manager.save(t.item(), args=ocp.args.StandardSave(runner_state))
-    ckpt_manager.wait_until_finished() 
-
-
-@hydra.main(version_base=None, config_path="config", config_name="mappo_homogenous_rnn_waymax")
-def main(config):
+@hydra.main(version_base=None, config_path="config", config_name="config")
+def main(config: Config):
     init_config(config)
     if config.overwrite:
         shutil.rmtree(config.exp_dir, ignore_errors=True)
@@ -549,6 +548,7 @@ def main(config):
     latest_update_step = 0 if latest_update_step is None else latest_update_step
 
     os.makedirs(config.exp_dir, exist_ok=True)
+    os.makedirs(config.vid_dir, exist_ok=True)
 
     run = wandb.init(
         # entity=config.ENTITY,

@@ -1,43 +1,91 @@
 """
 Based on PureJaxRL Implementation of IPPO, with changes to give a centralised critic.
 """
-import dataclasses
 from functools import partial
-import os
+import struct
 from typing import Sequence, NamedTuple, Any, Tuple, Union, Dict
 
 import chex
 import jax
 import jax.numpy as jnp
-import flax.linen as nn
-from flax import struct
 from flax.linen.initializers import constant, orthogonal
-from flax.training import orbax_utils
 import numpy as np
-import optax
-import orbax
-import wandb
-import functools
 from flax.training.train_state import TrainState
-import distrax
+from flax import struct
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from time import perf_counter
 
 from rl.environments.spaces import Box
-from rl.environments.multi_agent_env import MultiAgentEnv
-from rl.wrappers.baselines import JaxMARLWrapper, LogWrapper, WaymaxLogWrapper
-from waymax import config as _config
-from waymax import dataloader
+from rl.environments.multi_agent_env import MultiAgentEnv, State
+from rl.wrappers.baselines import JaxMARLWrapper, LogEnvState
 from waymax import datatypes
-from waymax import dynamics
 from waymax import env as _env
 from waymax import agents
 from waymax import visualization
 from waymax.datatypes.action import Action
 from waymax.datatypes.simulator_state import SimulatorState
 
-max_num_objects = 32
+
+@struct.dataclass
+class WaymaxLogEnvState:
+    env_state: State
+    episode_returns: float
+    episode_lengths: int
+    returned_episode_returns: float
+    returned_episode_lengths: int
+
+
+class WaymaxLogWrapper(JaxMARLWrapper):
+    def __init__(self, env: MultiAgentEnv, replace_info: bool = False):
+        super().__init__(env)
+        self.replace_info = replace_info
+
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, scenario, key: chex.PRNGKey) -> Tuple[chex.Array, State]:
+        obs, env_state = self._env.reset(scenario, key)
+        state = WaymaxLogEnvState(
+            env_state,
+            jnp.zeros((self._env.num_agents,)),
+            jnp.zeros((self._env.num_agents,)),
+            jnp.zeros((self._env.num_agents,)),
+            jnp.zeros((self._env.num_agents,)),
+        )
+        return obs, state
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(
+        self,
+        key: chex.PRNGKey,
+        state: WaymaxLogEnvState,
+        action: Union[int, float],
+        scenario,
+    ) -> Tuple[chex.Array, LogEnvState, float, bool, dict]:
+        obs, env_state, reward, done, info = self._env.step(
+            key, state.env_state, action, scenario
+        )
+        ep_done = done["__all__"]
+        new_episode_return = state.episode_returns + self._batchify_floats(reward)
+        new_episode_length = state.episode_lengths + 1
+        # new_won_episode = (batch_reward >= 1.0).astype(jnp.float32)
+        state = WaymaxLogEnvState(
+            env_state=env_state,
+            # won_episode=new_won_episode * (1 - ep_done),
+            episode_returns=new_episode_return * (1 - ep_done),
+            episode_lengths=new_episode_length * (1 - ep_done),
+            returned_episode_returns=state.returned_episode_returns * (1 - ep_done)
+            + new_episode_return * ep_done,
+            returned_episode_lengths=state.returned_episode_lengths * (1 - ep_done)
+            + new_episode_length * ep_done,
+        )
+        if self.replace_info:
+            info = {}
+        info["returned_episode_returns"] = state.returned_episode_returns
+        info["returned_episode_lengths"] = state.returned_episode_lengths
+        info["returned_episode"] = jnp.full((self._env.num_agents,), ep_done)
+        return obs, state, reward, done, info
+
+
 
 class WaymaxWrapper(JaxMARLWrapper):
     """
@@ -159,7 +207,6 @@ class WaymaxWrapper(JaxMARLWrapper):
         action = Action(data=data, valid=valid)
         reward = self._env.reward(state, action)
         env_state = self._env.step(state, action)
-        obs = self.get_obs(env_state)
         info = {}
         obs = self.get_obs(env_state)
         done = {'__all__': env_state.is_done}
@@ -186,38 +233,50 @@ class WaymaxWrapper(JaxMARLWrapper):
     def world_state_size(self):
         return self._world_state_size 
     
-    def render(self, scenario, env, dynamics_model, init_steps = 11):
+    def render(self, scenario, env, key: jax.random.PRNGKey, actor=None, init_steps=11):
         """Make a video of the policy acting in the environment."""
         
-        # IDM actor/policy controlling both object 0 and 1.
-        # TODO: use our policy 
-        actor = agents.IDMRoutePolicy(
-            # Controlled objects are those valid at t=0.
-            is_controlled_func=lambda state: state.log_trajectory.valid[..., init_steps]
-        )
+        if actor is None:
+            # IDM actor/policy controlling both object 0 and 1.
+            # TODO: use our policy 
+            actor = agents.IDMRoutePolicy(
+                # Controlled objects are those valid at t=0.
+                is_controlled_func=lambda state: state.log_trajectory.valid[..., init_steps]
+            )
         
         actors = [actor]
 
         jit_step = jax.jit(env.step)
         jit_select_action_list = [jax.jit(actor.select_action) for actor in actors]
 
-        states = [env.reset(scenario)]
+        init_obs, init_state = env.reset(scenario, key)
         frames = []
         rng = jax.random.PRNGKey(0)
-        for i in range(states[0].remaining_timesteps):
-            current_state = states[-1]
 
-            outputs = [
-                jit_select_action({}, current_state, None, rng)
-                for jit_select_action in jit_select_action_list
-            ]
+        def step_env(carry, _):
+            rng, obs, state = carry
+
+            traj = datatypes.dynamic_index(
+                state.sim_trajectory, state.timestep, axis=-1, keepdims=True
+            )
+            hidden, pi = actor.network.apply(actor.params, hidden, obs)            
+
+            # outputs = [
+            #     jit_select_action({}, state, obs, None, rng)
+            #     for jit_select_action in jit_select_action_list
+            # ]
             action = agents.merge_actions(outputs)
-            next_state = jit_step(current_state, action)
+            next_state = jit_step(state, action)
             rng, _ = jax.random.split(rng)
 
-            states.append(next_state)
+            return (rng, next_state), next_state
             
+        frames = [visualization.plot_simulator_state(init_state.env_state, use_log_traj=False)]
+        remaining_timesteps = init_state.env_state.remaining_timesteps
+        states = jax.lax.scan(step_env, (rng, init_obs, init_state), None, length=remaining_timesteps, reverse=False, unroll=5)
+        for i in range(remaining_timesteps):
             if i % 5 == 0:
-                frames.append(visualization.plot_simulator_state(next_state, use_log_traj=False))
+                state = jax.tree.map_structure(lambda x: x[i], states)
+                frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False))
 
         return np.array(frames)

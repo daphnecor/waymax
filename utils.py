@@ -1,10 +1,12 @@
 import dataclasses
 from functools import partial
 import os
+import pickle
 import shutil
 from typing import Sequence, NamedTuple, Any, Tuple, Union, Dict
 
 import chex
+import imageio
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
@@ -25,7 +27,7 @@ from rl.config.config import Config
 from rl.environments.spaces import Box
 from rl.environments.multi_agent_env import MultiAgentEnv
 from rl.model import ActorRNN, CriticRNN, ScannedRNN
-from rl.wrappers.baselines import JaxMARLWrapper, LogWrapper, WaymaxLogWrapper
+from rl.wrappers.baselines import JaxMARLWrapper, LogWrapper
 from waymax import config as _config
 from waymax import dataloader
 from waymax import datatypes
@@ -35,7 +37,7 @@ from waymax import agents
 from waymax import visualization
 from waymax.datatypes.action import Action
 from waymax.datatypes.simulator_state import SimulatorState
-from rl.wrappers.marl import WaymaxWrapper
+from rl.wrappers.marl import WaymaxLogEnvState, WaymaxLogWrapper, WaymaxWrapper
 
 
 @struct.dataclass
@@ -67,33 +69,64 @@ def linear_schedule(config, count):
     )
     return config["LR"] * frac
 
+    
+# Reload single scenario from disk for speedier debugging
+DEBUG_WITH_ONE_SCENARIO = True
+
 
 def init_or_restore_run(config: Config, ckpt_manager, latest_update_step, rng):
     t_start_up_start = perf_counter()
    
-    # Configure dataset
-    t_data_iter_start = perf_counter()
-    dataset_config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=config.max_num_objects)
-    data_iter = dataloader.simulator_state_generator(config=dataset_config)
     
-    t_data_iter_end = perf_counter()
+    # HACK when debugging with one scenario to avoid long loading time for data iterator
+    scenario_name = f"scenario_{config.max_num_objects}-max-objects.pkl"
+    if DEBUG_WITH_ONE_SCENARIO:
+        t_data_iter_start = perf_counter()
+        t_next_start = perf_counter()
+        with open(scenario_name, "rb") as f:
+           scenario: SimulatorState = pickle.load(f) 
+        t_data_iter_end = perf_counter()
+        t_next_end = perf_counter() 
+
+    else:
+        # Configure dataset
+        t_data_iter_start = perf_counter()
+        dataset_config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=config.max_num_objects)
+        data_iter = dataloader.simulator_state_generator(config=dataset_config)
+        t_data_iter_end = perf_counter()
     
-    t_next_start = perf_counter()
+        t_next_start = perf_counter()
+        scenario: SimulatorState = next(data_iter)
+        t_next_end = perf_counter() 
+        # Save this scenario to disk for later use
+        with open(scenario_name, "wb") as f:
+            pickle.dump(scenario, f)
+
     
-    scenario = next(data_iter)
     
-    t_next_end = perf_counter() 
     
     dynamics_model = dynamics.InvertibleBicycleModel()
+
+    # Create env config
+    env_config = dataclasses.replace(
+        _config.EnvironmentConfig(),
+        max_num_objects=config.max_num_objects,
+        rewards=_config.LinearCombinationRewardConfig(
+            {
+                # 'overlap': -1.0, 
+                'offroad': -1.0, 
+                # 'log_divergence': 1.0
+            }
+        ),
+        #metrics={}
+        # Controll all valid objects in the scene.
+        controlled_object=_config.ObjectType.VALID,
+    )
 
     # Create waymax environment
     waymax_base_env = _env.MultiAgentEnvironment(
         dynamics_model=dynamics_model,
-        config=dataclasses.replace(
-            _config.EnvironmentConfig(),
-            max_num_objects=config.max_num_objects,
-            controlled_object=_config.ObjectType.VALID,
-        ),
+        config=env_config,
     )
     # Wrap environment with JAXMARL wrapper
     env = WaymaxWrapper(waymax_base_env, obs_with_agent_id=False)
@@ -197,3 +230,113 @@ def init_or_restore_run(config: Config, ckpt_manager, latest_update_step, rng):
         wandb_run_id = None
 
     return runner_state, env, scenario, latest_update_step, wandb_run_id, wandb_resume
+
+
+def make_sim_render_episode(config: Config, actor_network, env, scenario):
+    # FIXME: Shouldn't hardcode this
+    max_episode_len = 91
+
+    rng = jax.random.PRNGKey(0)
+    init_obs, init_state = env.reset(scenario, rng)
+    init_obs = batchify(init_obs, env.agents, env.num_agents)
+    # remaining_timesteps = init_state.env_state.remaining_timesteps
+    # actor_params = runner_state.train_states[0].params
+    # actor_hidden = runner_state.hstates[0]
+
+    def sim_render_episode(actor_params, actor_hidden):
+        def step_env(carry, _):
+            rng, obs, state, done, actor_hidden = carry
+            # print(obs.shape)
+
+            # traj = datatypes.dynamic_index(
+            #     state.env_state.sim_trajectory, state.env_state.timestep, axis=-1, keepdims=True
+            # )
+            avail_actions = env.get_avail_actions(state.env_state)
+            avail_actions = jax.lax.stop_gradient(
+                batchify(avail_actions, env.agents, len(env.agents))
+            )
+            ac_in = (
+                obs[np.newaxis, :],
+                # obs,
+                done[np.newaxis, :],
+                # done,
+                avail_actions[np.newaxis, :],
+            )
+            actor_hidden, pi = actor_network.apply(actor_params, actor_hidden, ac_in)            
+            action = pi.sample(seed=rng)
+            env_act = unbatchify(
+                action, env.agents, 1, env.num_agents
+            )
+            env_act = {k: v.squeeze() for k, v in env_act.items()}
+
+            # outputs = [
+            #     jit_select_action({}, state, obs, None, rng)
+            #     for jit_select_action in jit_select_action_list
+            # ]
+            # action = agents.merge_actions(outputs)
+            obs, next_state, reward, done, info = env.step(state=state, action=env_act, scenario=scenario, key=rng)
+            rng, _ = jax.random.split(rng)
+            done = batchify(done, env.agents, env.num_agents)[:, 0]
+            obs = batchify(obs, env.agents, env.num_agents)
+
+            return (rng, obs, next_state, done, actor_hidden), next_state
+
+            
+        done = jnp.zeros((len(env.agents),), dtype=bool)
+
+        _, states = jax.lax.scan(step_env, (rng, init_obs, init_state, done, actor_hidden), None, length=max_episode_len)
+
+        # Concatenate the init_state to the states
+        states = jax.tree.map(lambda x, y: jnp.concatenate([x[None], y], axis=0), init_state, states)
+
+        return states
+
+    return jax.jit(sim_render_episode)
+
+# states = []
+# rng, obs, state, done, actor_hidden = (rng, init_obs, init_state, done, actor_hidden)
+# for i in range(remaining_timesteps):
+#     carry, state = step_env((rng, obs, state, done, actor_hidden), None)
+#     rng, obs, state, done, actor_hidden = carry
+#     states.append(state)
+
+    
+def render_callback(states: WaymaxLogEnvState, save_dir: str, t: int):
+
+    frames = []
+    for i in range(states.env_state.remaining_timesteps[0].item()):
+        if (i == 0) or ((i + 1) % 5 == 0):
+            # state = jax.tree.map(lambda x: x[i] if len(x.shape) > 0 else x, states)
+            state = jax.tree.map(lambda x: x[i], states)
+            state = jax.device_put(state, jax.devices('cpu')[0])
+            with jax.disable_jit():
+                frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False,
+                                                                 render_overlaps=False))
+
+    imageio.mimsave(os.path.join(save_dir, f"enjoy_{t}.gif"), frames, fps=10, loop=0)
+    wandb.log({"video": wandb.Video(os.path.join(save_dir, f"enjoy_{t}.gif"), fps=10, format="gif")})
+
+
+def get_exp_dir(config):
+    exp_dir = os.path.join(
+        'saves',
+        f"{config.SEED}"
+    )
+    return exp_dir
+
+
+def get_ckpt_dir(config):
+    ckpts_dir = os.path.abspath(os.path.join(config.exp_dir, "ckpts"))
+    return ckpts_dir
+
+    
+def init_config(config: Config):
+    config.exp_dir = get_exp_dir(config)
+    config.ckpt_dir = get_ckpt_dir(config)
+    config.vid_dir = os.path.join(config.exp_dir, "vids")
+
+    
+def save_checkpoint(config, ckpt_manager, runner_state, t):
+    ckpt_manager.save(t.item(), args=ocp.args.StandardSave(runner_state))
+    ckpt_manager.wait_until_finished() 
+

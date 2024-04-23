@@ -40,6 +40,7 @@ def _plot_bounding_boxes(
     is_controlled: np.ndarray,
     valid: np.ndarray,
     add_label: bool = False,
+    render_overlaps: bool = True,
 ) -> None:
   """Helper function to plot multiple bounding boxes across time."""
   # Plots bounding boxes (traj_5dof) with shape: (A, T)
@@ -76,16 +77,25 @@ def _plot_bounding_boxes(
       label='context' if add_label else None,
   )
 
-  # Shows current overlap
-  # (A, A)
-  overlap_fn = jax.jit(geometry.compute_pairwise_overlaps)
-  overlap_mask_matrix = overlap_fn(traj_5dof[:, time_idx])
-  # Remove overlap against invalid objects.
-  overlap_mask_matrix = np.where(
-      valid[None, :, time_idx], overlap_mask_matrix, False
-  )
-  # (A,)
-  overlap_mask = np.any(overlap_mask_matrix, axis=1)
+  # NOTE: The code below hangs when called from inside a jax.experimental.io_callback, presumably because we shouldn't
+  #   have jitted code inside such a callback. Perhaps we can toggle the overlap mask off if we really want videos 
+  #   during training.
+  
+
+  if render_overlaps:
+    # Shows current overlap
+    # (A, A)
+    overlap_fn = jax.jit(geometry.compute_pairwise_overlaps)
+    overlap_mask_matrix = overlap_fn(traj_5dof[:, time_idx])
+    # Remove overlap against invalid objects.
+    overlap_mask_matrix = np.where(
+        valid[None, :, time_idx], overlap_mask_matrix, False
+    )
+    # (A,)
+    overlap_mask = np.any(overlap_mask_matrix, axis=1)
+
+  else:
+    overlap_mask = np.zeros(num_obj, dtype=bool)
 
   utils.plot_numpy_bounding_boxes(
       ax=ax,
@@ -114,6 +124,7 @@ def plot_trajectory(
     time_idx: Optional[int] = None,
     indices: Optional[np.ndarray] = None,
     add_label: bool = False,
+    render_overlaps: bool = True,
 ) -> None:
   """Plots a Trajectory with different color for controlled and context.
 
@@ -166,6 +177,7 @@ def plot_trajectory(
       is_controlled=is_controlled,
       valid=traj.valid,
       add_label=add_label,
+      render_overlaps=render_overlaps,
   )  # pytype: disable=wrong-arg-types  # jax-ndarray
 
 
@@ -248,6 +260,7 @@ def plot_simulator_state(
     viz_config: Optional[dict[str, Any]] = None,
     batch_idx: int = -1,
     highlight_obj: waymax_config.ObjectType = waymax_config.ObjectType.SDC,
+    render_overlaps: bool = True,
 ) -> np.ndarray:
   """Plots np array image for SimulatorState.
 
@@ -284,7 +297,8 @@ def plot_simulator_state(
       state.object_metadata, highlight_obj
   )
   plot_trajectory(
-      ax, traj, is_controlled, time_idx=state.timestep, indices=indices
+      ax, traj, is_controlled, time_idx=state.timestep, indices=indices,
+      render_overlaps=render_overlaps,
   )  # pytype: disable=wrong-arg-types  # jax-ndarray
 
   # 2. Plots road graph elements.

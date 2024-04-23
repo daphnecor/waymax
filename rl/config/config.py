@@ -12,12 +12,11 @@ from dataclasses import dataclass
 @dataclass
 class Config:
     LR: float = 0.001
-    BATCH_SIZE: int = 32
+    BATCH_SIZE: int = 1024
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
 
 
-    LR: float = 0.002
     NUM_ENVS: int = 128
     NUM_STEPS: int = 128 
     TOTAL_TIMESTEPS: float = 1e7
@@ -40,11 +39,16 @@ class Config:
     ANNEAL_LR: bool = False
     overwrite: bool = False
     ckpt_freq: int = 50
+    render_freq: int = 50
 
     # WandB Params
     WANDB_MODE: str = 'run'
     ENTITY: str = ""
     PROJECT: str = 'waymax_saphne'
+
+    # DO NOT CHANGE THIS. It is dark magic?
+    max_num_objects: int = 32
+
 
     # DO NOT CHANGE THESE. They will be set automatically in the code.
     NUM_ACTORS: int = -1
@@ -52,9 +56,8 @@ class Config:
     NUM_UPDATES: int = -1
     exp_dir: str = ""
     ckpt_dir: str = ""
+    vid_dir: str = ""
 
-    # DO NOT CHANGE THIS.
-    max_num_objects: int = 32
 
 cs = ConfigStore.instance()
 cs.store(name="config", node=Config)
