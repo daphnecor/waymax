@@ -10,15 +10,15 @@ from orbax import checkpoint as ocp
 from waymax import datatypes
 from waymax import visualization
 
-from rl.config.config import Config
+from rl.config.config import EnjoyConfig
 from rl.mappo import RunnerState, init_config
 from rl.model import ActorRNN
 from rl.wrappers.marl import WaymaxWrapper
-from utils import batchify, init_or_restore_run, unbatchify
+from utils import batchify, init_run, restore_run, unbatchify
 
 
-@hydra.main(version_base=None, config_path="config", config_name="config")
-def enjoy(config: Config):
+@hydra.main(version_base=None, config_path="config", config_name="enjoy")
+def enjoy(config: EnjoyConfig):
     init_config(config)
 
     # TODO: Render multiple episodes, generate states efficiently by vmapping.
@@ -32,8 +32,12 @@ def enjoy(config: Config):
     runner_state: RunnerState
     env: WaymaxWrapper
     latest_update_step = checkpoint_manager.latest_step()
-    runner_state, env, scenario, latest_update_step, wandb_run_id, wandb_resume = \
-        init_or_restore_run(config, checkpoint_manager, latest_update_step, rng)
+    runner_state, env, scenario, latest_update_step = \
+        init_run(config, checkpoint_manager, latest_update_step, rng)
+
+    if not config.random_agent:
+        runner_state, _ = restore_run(config, runner_state, checkpoint_manager, latest_update_step)
+
     actor_network = ActorRNN(env.action_space(env.agents[0]).shape[0], config=config)
 
     rng = jax.random.PRNGKey(0)
@@ -48,23 +52,29 @@ def enjoy(config: Config):
         # traj = datatypes.dynamic_index(
         #     state.env_state.sim_trajectory, state.env_state.timestep, axis=-1, keepdims=True
         # )
-        avail_actions = env.get_avail_actions(state.env_state)
-        avail_actions = jax.lax.stop_gradient(
-            batchify(avail_actions, env.agents, len(env.agents))
-        )
-        ac_in = (
-            obs[np.newaxis, :],
-            # obs,
-            done[np.newaxis, :],
-            # done,
-            avail_actions[np.newaxis, :],
-        )
-        actor_hidden, pi = actor_network.apply(actor_params, actor_hidden, ac_in)            
-        action = pi.sample(seed=rng)
-        env_act = unbatchify(
-            action, env.agents, config.NUM_ENVS, env.num_agents
-        )
-        env_act = {k: v.squeeze() for k, v in env_act.items()}
+
+        if not config.random_agent:
+            avail_actions = env.get_avail_actions(state.env_state)
+            avail_actions = jax.lax.stop_gradient(
+                batchify(avail_actions, env.agents, len(env.agents))
+            )
+            ac_in = (
+                obs[np.newaxis, :],
+                # obs,
+                done[np.newaxis, :],
+                # done,
+                avail_actions[np.newaxis, :],
+            )
+            actor_hidden, pi = actor_network.apply(actor_params, actor_hidden, ac_in)            
+            action = pi.sample(seed=rng)
+            env_act = unbatchify(
+                action, env.agents, config.NUM_ENVS, env.num_agents
+            )
+            env_act = {k: v.squeeze() for k, v in env_act.items()}
+        else:
+            rng_acts = jax.random.split(rng, len(env.agents))
+            agent_acts = jax.vmap(env.action_space(env.agents[0]).sample, in_axes=(0,))(rng_acts)
+            env_act = {agent: act for agent, act in zip(env.agents, agent_acts)}
 
         # outputs = [
         #     jit_select_action({}, state, obs, None, rng)
@@ -97,13 +107,19 @@ def enjoy(config: Config):
     # frames = [visualization.plot_simulator_state(init_state.env_state, use_log_traj=False)]
     frames = []
     for i in range(remaining_timesteps):
-        if i % 5 == 0:
+        if i % 1 == 0:
             # state = jax.tree.map(lambda x: x[i] if len(x.shape) > 0 else x, states)
             state = jax.tree.map(lambda x: x[i], states)
             # Print all leaf names
             frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False))
+    
+    os.makedirs(config.vid_dir, exist_ok=True)
 
-    imageio.mimsave(os.path.join(config.vid_dir, f"enjoy_{latest_update_step}.gif"), frames, fps=10, loop=0)
+    if config.random_agent:
+        vid_path = os.path.join(config.vid_dir, f"enjoy_random_agent.gif")
+    else:
+        vid_path = os.path.join(config.vid_dir, f"enjoy_{latest_update_step}.gif")
+    imageio.mimsave(vid_path, frames, fps=10, loop=0)
 
     
 if __name__ == '__main__':

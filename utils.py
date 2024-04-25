@@ -74,13 +74,12 @@ def linear_schedule(config, count):
 DEBUG_WITH_ONE_SCENARIO = True
 
 
-def init_or_restore_run(config: Config, ckpt_manager, latest_update_step, rng):
+def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     t_start_up_start = perf_counter()
-   
     
     # HACK when debugging with one scenario to avoid long loading time for data iterator
     scenario_name = f"scenario_{config.max_num_objects}-max-objects.pkl"
-    if DEBUG_WITH_ONE_SCENARIO:
+    if DEBUG_WITH_ONE_SCENARIO and os.path.isfile(scenario_name):
         t_data_iter_start = perf_counter()
         t_next_start = perf_counter()
         with open(scenario_name, "rb") as f:
@@ -101,9 +100,6 @@ def init_or_restore_run(config: Config, ckpt_manager, latest_update_step, rng):
         # Save this scenario to disk for later use
         with open(scenario_name, "wb") as f:
             pickle.dump(scenario, f)
-
-    
-    
     
     dynamics_model = dynamics.InvertibleBicycleModel()
 
@@ -114,8 +110,8 @@ def init_or_restore_run(config: Config, ckpt_manager, latest_update_step, rng):
         rewards=_config.LinearCombinationRewardConfig(
             {
                 # 'overlap': -1.0, 
-                'offroad': -1.0, 
-                # 'log_divergence': 1.0
+                # 'offroad': -1.0, 
+                'log_divergence': 1.0
             }
         ),
         #metrics={}
@@ -220,16 +216,16 @@ def init_or_restore_run(config: Config, ckpt_manager, latest_update_step, rng):
         _rng,
     )
 
+    return runner_state, env, scenario, latest_update_step
+
+
+def restore_run(config: Config, runner_state: RunnerState, ckpt_manager, latest_update_step: int):
     if latest_update_step is not None:
         runner_state = ckpt_manager.restore(latest_update_step, args=ocp.args.StandardRestore(runner_state))
-        wandb_resume = 'Must'
         with open(os.path.join(config.exp_dir, "wandb_run_id.txt"), "r") as f:
             wandb_run_id = f.read()
-    else:
-        wandb_resume = None
-        wandb_run_id = None
 
-    return runner_state, env, scenario, latest_update_step, wandb_run_id, wandb_resume
+    return runner_state, wandb_run_id
 
 
 def make_sim_render_episode(config: Config, actor_network, env, scenario):

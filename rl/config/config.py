@@ -15,8 +15,6 @@ class Config:
     BATCH_SIZE: int = 1024
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
-
-
     NUM_ENVS: int = 128
     NUM_STEPS: int = 128 
     TOTAL_TIMESTEPS: float = 1e7
@@ -58,6 +56,12 @@ class Config:
     ckpt_dir: str = ""
     vid_dir: str = ""
 
+    
+@dataclass
+class EnjoyConfig(Config):
+    random_agent: bool = False
+
 
 cs = ConfigStore.instance()
 cs.store(name="config", node=Config)
+cs.store(name="enjoy", node=EnjoyConfig)

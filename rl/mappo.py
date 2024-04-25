@@ -15,31 +15,16 @@ from flax import struct
 from flax.linen.initializers import constant, orthogonal
 # from flax.training import orbax_utils
 import numpy as np
-import optax
 import orbax.checkpoint as ocp
 import wandb
 import functools
 from flax.training.train_state import TrainState
 import hydra
-from omegaconf import DictConfig, OmegaConf
-from time import perf_counter
+from omegaconf import OmegaConf
 
 from rl.config.config import Config
-from rl.environments.spaces import Box
-from rl.environments.multi_agent_env import MultiAgentEnv
 from rl.model import ActorRNN, CriticRNN, ScannedRNN
-from rl.wrappers.baselines import JaxMARLWrapper, LogWrapper
-from utils import RunnerState, batchify, init_config, init_or_restore_run, make_sim_render_episode, render_callback, save_checkpoint, unbatchify
-from waymax import config as _config
-from waymax import dataloader
-from waymax import datatypes
-from waymax import dynamics
-from waymax import env as _env
-from waymax import agents
-from waymax import visualization
-from waymax.datatypes.action import Action
-from waymax.datatypes.simulator_state import SimulatorState
-from rl.wrappers.marl import WaymaxWrapper, WaymaxLogWrapper
+from utils import RunnerState, batchify, init_config, init_run, make_sim_render_episode, render_callback, restore_run, save_checkpoint, unbatchify
 
 
 class Transition(NamedTuple):
@@ -543,8 +528,15 @@ def main(config: Config):
 
     rng = jax.random.PRNGKey(config.SEED)
     latest_update_step = checkpoint_manager.latest_step()
-    runner_state, env, scenario, latest_update_step, wandb_run_id, wandb_resume = \
-        init_or_restore_run(config, checkpoint_manager, latest_update_step, rng)
+    runner_state, env, scenario, latest_update_step = \
+        init_run(config, checkpoint_manager, latest_update_step, rng)
+
+    if latest_update_step is not None:
+        runner_state, wandb_run_id = restore_run(config, runner_state, checkpoint_manager, latest_update_step)
+        wandb_resume = "Must"
+    else:
+        wandb_run_id, wandb_resume = None, None
+
     latest_update_step = 0 if latest_update_step is None else latest_update_step
 
     os.makedirs(config.exp_dir, exist_ok=True)
