@@ -20,12 +20,12 @@ import wandb
 import functools
 from flax.training.train_state import TrainState
 import hydra
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from rl.config.config import Config
 from rl.model import ActorRNN, CriticRNN, ScannedRNN
-from utils import RunnerState, batchify, init_config, init_run, make_sim_render_episode, render_callback, restore_run, save_checkpoint, unbatchify
-
+from rl.wrappers.baselines import JaxMARLWrapper, LogWrapper
+from utils import RunnerState, batchify, init_config, init_or_restore_run, make_sim_render_episode, render_callback, save_checkpoint, unbatchify
 
 class Transition(NamedTuple):
     global_done: jnp.ndarray
@@ -40,35 +40,54 @@ class Transition(NamedTuple):
     avail_actions: jnp.ndarray
 
 
-def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
-               actor_network, env, scenario, latest_update_step, wandb_run_id):
-    _render_callback = partial(render_callback, save_dir=config._vid_dir)
+def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wandb_run_id):
+    
+    _render_callback = partial(render_callback, save_dir=config.vid_dir)
 
     def train(rng, runner_state=None):
 
-        # INIT ENV
+        # INIT ENV (?) --> Done in another `init_or_restore_run` function 
         rng, _rng = jax.random.split(rng)
 
-        # INIT NETWORK
+        # INIT NETWORK --> TODO: Switch to FNN (see hanabi script)
+        actor_network = ActorRNN(
+            env.action_space(env.agents[0]).shape[0], 
+            config=config
+        )
         critic_network = CriticRNN(config=config)
-
-        jit_sim_render_episode = make_sim_render_episode(config, actor_network, env, scenario)
+        
+        jit_sim_render_episode = make_sim_render_episode(
+            config, actor_network, 
+            env, 
+            scenario
+        )
         num_render_actors = 1 * env.num_agents
-        ac_init_hstate_render = ScannedRNN.initialize_carry(num_render_actors, config.HIDDEN_DIM)
-        render_states = jit_sim_render_episode(runner_state.train_states[0].params, ac_init_hstate_render)
+        ac_init_hstate_render = ScannedRNN.initialize_carry(
+            num_render_actors, 
+            128
+        )
+        render_states = jit_sim_render_episode(
+            runner_state.train_states[0].params, 
+            ac_init_hstate_render
+        )
         jax.experimental.io_callback(_render_callback, None, states=render_states, t=0)
 
         # TRAIN LOOP
         def _update_step_with_render(update_runner_state, unused, render_states):
+            
             # COLLECT TRAJECTORIES
             runner_state, update_steps = update_runner_state
             
             def _env_step(runner_state: RunnerState, unused):
-                train_states, env_state, last_obs, last_done, hstates, rng = (runner_state.train_states,
-                                                                              runner_state.env_state,
-                                                                              runner_state.last_obs,
-                                                                              runner_state.last_done,
-                                                                              runner_state.hstates, runner_state.rng)
+                
+                train_states, env_state, last_obs, last_done, hstates, rng = (
+                    runner_state.train_states,
+                    runner_state.env_state,
+                    runner_state.last_obs,
+                    runner_state.last_done,
+                    runner_state.hstates, 
+                    runner_state.rng
+                )
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -76,14 +95,22 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 avail_actions = jax.lax.stop_gradient(
                     batchify(avail_actions, env.agents, config._num_actors)
                 )
-                obs_batch = batchify(last_obs, env.agents, config._num_actors)
+
+                obs_batch = batchify(last_obs, env.agents, config["NUM_ACTORS"])
+                
                 ac_in = (
                     obs_batch[np.newaxis, :],
                     last_done[np.newaxis, :],
                     avail_actions,
                 )
-                #print('env step ac in', ac_in)
-                ac_hstate, pi = actor_network.apply(train_states[0].params, hstates[0], ac_in)
+                                
+                ac_hstate, pi = actor_network.apply(
+                    train_states[0].params, 
+                    hstates[0], 
+                    ac_in,
+                )
+                
+                # Sample actions (?)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
                 env_act = unbatchify(
@@ -93,7 +120,8 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
 
                 # VALUE
                 # output of wrapper is (num_envs, num_agents, world_state_size)
-                # swap axes to (num_agents, num_envs, world_state_size) before reshaping to (num_actors, world_state_size)
+                # swap axes to (num_agents, num_envs, world_state_size) 
+                # before reshaping to (num_actors, world_state_size)
                 world_state = last_obs["world_state"].swapaxes(0,1)  
                 world_state = world_state.reshape((config._num_actors,-1))
                 
@@ -101,7 +129,11 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                     world_state[None, :],
                     last_done[np.newaxis, :],
                 )
-                cr_hstate, value = critic_network.apply(train_states[1].params, hstates[1], cr_in)
+                cr_hstate, value = critic_network.apply(
+                    train_states[1].params, 
+                    hstates[1], 
+                    cr_in
+                )
 
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
@@ -109,8 +141,9 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 obsv, env_state, reward, done, info = jax.vmap(
                     env.step, in_axes=(0, 0, 0, None)
                 )(rng_step, env_state, env_act, scenario)
-                info = jax.tree.map(lambda x: x.reshape((config._num_actors)), info)
-                done_batch = batchify(done, env.agents, config._num_actors).squeeze()
+                
+                info = jax.tree.map(lambda x: x.reshape((config["NUM_ACTORS"])), info)
+                done_batch = batchify(done, env.agents, config["NUM_ACTORS"]).squeeze()
                 transition = Transition(
                     jnp.tile(done["__all__"], env.num_agents),
                     last_done,
@@ -123,7 +156,9 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                     info,
                     avail_actions,
                 )
+                
                 runner_state = RunnerState(train_states, env_state, obsv, done_batch, (ac_hstate, cr_hstate), rng)
+                
                 return runner_state, transition
 
             initial_hstates = runner_state.hstates
@@ -132,14 +167,17 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             )
             
             # CALCULATE ADVANTAGE
-            train_states, env_state, last_obs, last_done, hstates, rng = (runner_state.train_states,
-                                                                            runner_state.env_state,
-                                                                            runner_state.last_obs,
-                                                                            runner_state.last_done,
-                                                                            runner_state.hstates, runner_state.rng)
+            train_states, env_state, last_obs, last_done, hstates, rng = (
+                runner_state.train_states,
+                runner_state.env_state,
+                runner_state.last_obs,
+                runner_state.last_done,
+                runner_state.hstates, 
+                runner_state.rng
+            )
             
             last_world_state = last_obs["world_state"].swapaxes(0,1)
-            last_world_state = last_world_state.reshape((config._num_actors,-1))
+            last_world_state = last_world_state.reshape((config["NUM_ACTORS"], -1))
             
             cr_in = (
                 last_world_state[None, :],
@@ -335,10 +373,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             rng = update_state[-1]
 
             def callback(metric):
-                
-                # Create a video
-                # frames = env.render(scenario, waymax_base_env, dynamics_model)
-                # Video must be atleast 4 dimensions: time, channels, height, width
 
                 wandb.log(
                     {
@@ -354,7 +388,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         * config["NUM_ENVS"]
                         * config["NUM_STEPS"],
                         **metric["loss"],
-                        # "video": wandb.Video(frames, fps=10, format="gif"),
                     }
                 )
 
@@ -402,39 +435,35 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(config: Config):
     init_config(config)
-    if config.OVERWRITE:
-        shutil.rmtree(config._exp_dir, ignore_errors=True)
+    if config.overwrite:
+        shutil.rmtree(config.exp_dir, ignore_errors=True)
+        
+    run = None
 
-    options = ocp.CheckpointManagerOptions(
-        max_to_keep=2, create=True)
-    checkpoint_manager = ocp.CheckpointManager(
-        config._ckpt_DIR, options=options)
-
+    # options = ocp.CheckpointManagerOptions(
+    #     max_to_keep=2, create=True)
+    # checkpoint_manager = ocp.CheckpointManager(
+    #     directory=config.ckpt_dir, checkpointers={}, options=options)
+    checkpoint_manager = None
     rng = jax.random.PRNGKey(config.SEED)
-    latest_update_step = checkpoint_manager.latest_step()
-    runner_state, actor_network, env, scenario, latest_update_step = \
-        init_run(config, checkpoint_manager, latest_update_step, rng)
-
-    if latest_update_step is not None:
-        runner_state, wandb_run_id = restore_run(config, runner_state, checkpoint_manager, latest_update_step)
-        wandb_resume = "Must"
-    else:
-        wandb_run_id, wandb_resume = None, None
-
+    latest_update_step = None
+    #latest_update_step = checkpoint_manager.latest_step()
+    
+    # INIT OR RESTORE RUN
+    runner_state, env, scenario, latest_update_step, wandb_run_id, wandb_resume = \
+        init_or_restore_run(config, checkpoint_manager, latest_update_step, rng)
     latest_update_step = 0 if latest_update_step is None else latest_update_step
 
-    os.makedirs(config._exp_dir, exist_ok=True)
-    os.makedirs(config._vid_dir, exist_ok=True)
-
+    os.makedirs(config.exp_dir, exist_ok=True)
+    os.makedirs(config.vid_dir, exist_ok=True)
     run = wandb.init(
         # entity=config.ENTITY,
         project=config.PROJECT,
         tags=["MAPPO"],
         config=OmegaConf.to_container(config),
         mode=config.WANDB_MODE,
-        dir=config._exp_dir,
-        id=wandb_run_id,
-        resume=wandb_resume,
+        dir=config.exp_dir,
+        #resume=wandb_resume,
     )
     wandb_run_id = run.id
     with open(os.path.join(config._exp_dir, "wandb_run_id.txt"), "w") as f:

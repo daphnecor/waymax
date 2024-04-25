@@ -13,6 +13,8 @@ from dataclasses import dataclass
 class Config:
     LR: float = 0.001
     BATCH_SIZE: int = 32
+    LR: float = 3e-4
+    BATCH_SIZE: int = 1024
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
     NUM_ENVS: int = 128
@@ -43,15 +45,22 @@ class Config:
     OFFROAD: float = -1.0
     OVERLAP: float = 0.0
     LOG_DIVERGENCE: float = 0.0
+    overwrite: bool = False
+    ckpt_freq: int = 50
+    render_freq: int = 5
 
     # WandB Params
     WANDB_MODE: str = 'run'  # one of: 'offline', 'run', 'dryrun', 'shared', 'disabled', 'online'
     ENTITY: str = ""
     PROJECT: str = 'waymax_saphne'
+    WANDB_MODE: str = 'run'
+    ENTITY: str = ''
+    PROJECT: str = 'waymax'
 
     # DO NOT CHANGE THIS. It is dark magic?
     MAX_NUM_OBJECTS: int = 8
 
+    max_num_objects: int = 32
 
     # DO NOT CHANGE THESE. They will be set automatically in the code.
     _num_actors: int = -1
@@ -65,7 +74,6 @@ class Config:
 @dataclass
 class RenderConfig(Config):
     RANDOM_AGENT: bool = False
-
 
 cs = ConfigStore.instance()
 cs.store(name="config", node=Config)
