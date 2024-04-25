@@ -26,7 +26,7 @@ from waymax import visualization
 from waymax.datatypes.action import Action
 from waymax.datatypes import roadgraph
 from waymax.datatypes.simulator_state import SimulatorState
-
+from waymax.datatypes.observation import global_observation_from_state, observation_from_state
 
 @struct.dataclass
 class WaymaxLogEnvState:
@@ -187,6 +187,9 @@ class WaymaxWrapper(JaxMARLWrapper):
                 "world_state": world_state.repeat(env.num_agents, axis=0),
             }
         )
+        
+        jax.debug.breakpoint()
+          
         return obs
         
 
@@ -248,10 +251,10 @@ class WaymaxWrapper(JaxMARLWrapper):
         traj = datatypes.dynamic_index(
                 state.sim_trajectory, state.timestep, axis=-1, keepdims=True
         )
-
+        
         # TODO: Is this right?
         valid = traj.valid
-
+    
         action = Action(data=data, valid=valid)
         reward = self._env.reward(state, action)
         env_state = self._env.step(state, action)
@@ -264,6 +267,9 @@ class WaymaxWrapper(JaxMARLWrapper):
         done.update(
             {agent: True for agent, valid_i in zip(self.agents, valid)}
         )
+        
+        jax.debug.breakpoint()
+
         return obs, env_state, reward, done, info
 
     @partial(jax.jit, static_argnums=0)

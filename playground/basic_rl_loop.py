@@ -8,7 +8,7 @@ import wandb
 
 from waymax import config as _config
 from waymax import dataloader
-from waymax import datatypes
+from waymax.datatypes import observation
 from waymax import dynamics
 from waymax import env as _env
 from waymax import agents
@@ -29,7 +29,7 @@ def render_frames(states):
 if __name__ == "__main__":
 
     # Config dataset:
-    max_num_objects = 5
+    max_num_objects = 1
 
     config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=max_num_objects)
     data_iter = dataloader.simulator_state_generator(config=config)
@@ -65,6 +65,8 @@ if __name__ == "__main__":
         config=env_config,
     )
     
+    wrapped_env = WaymaxLogWrapper(env)
+    
     # Storage
     rewards = {}
     for agent_idx in range(max_num_objects):
@@ -85,14 +87,7 @@ if __name__ == "__main__":
         is_controlled_func=lambda state: obj_idx == 2,
     )
     
-    # Expert-controlled
-    actor_2 = agents.create_expert_actor(
-        dynamics_model=dynamics_model,
-        is_controlled_func=lambda state: (obj_idx == 0) | (obj_idx == 1) | (obj_idx == 3) | (obj_idx == 4),
-    )
-
-    
-    actors = [actor_1, actor_2]
+    actors = [actor_1]
     
     jit_step = jax.jit(env.step)
     jit_select_action_list = [jax.jit(actor.select_action) for actor in actors]
@@ -120,6 +115,8 @@ if __name__ == "__main__":
         reward = env.reward(current_state, action)
         
         next_state = jit_step(current_state, action)        
+        
+        observation.observation_from_state(current_state)
         
         rng, _ = jax.random.split(rng)
 
