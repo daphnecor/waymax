@@ -10,15 +10,16 @@ from orbax import checkpoint as ocp
 from waymax import datatypes
 from waymax import visualization
 
-from rl.config.config import EnjoyConfig
+from rl.config.config import RenderConfig
 from rl.mappo import RunnerState, init_config
 from rl.model import ActorRNN
 from rl.wrappers.marl import WaymaxWrapper
 from utils import batchify, init_run, restore_run, unbatchify
+from waymax.visualization.utils import VizConfig
 
 
-@hydra.main(version_base=None, config_path="config", config_name="enjoy")
-def enjoy(config: EnjoyConfig):
+@hydra.main(version_base=None, config_path="config", config_name="render")
+def render(config: RenderConfig):
     init_config(config)
 
     # TODO: Render multiple episodes, generate states efficiently by vmapping.
@@ -35,7 +36,7 @@ def enjoy(config: EnjoyConfig):
     runner_state, actor_network, env, scenario, latest_update_step = \
         init_run(config, checkpoint_manager, latest_update_step, rng)
 
-    if not config.random_agent:
+    if not config.RANDOM_AGENT:
         runner_state, _ = restore_run(config, runner_state, checkpoint_manager, latest_update_step)
 
     rng = jax.random.PRNGKey(0)
@@ -51,7 +52,7 @@ def enjoy(config: EnjoyConfig):
         #     state.env_state.sim_trajectory, state.env_state.timestep, axis=-1, keepdims=True
         # )
 
-        if not config.random_agent:
+        if not config.RANDOM_AGENT:
             avail_actions = env.get_avail_actions(state.env_state)
             avail_actions = jax.lax.stop_gradient(
                 batchify(avail_actions, env.agents, len(env.agents))
@@ -103,24 +104,35 @@ def enjoy(config: EnjoyConfig):
     #     states.append(state)
 
     # frames = [visualization.plot_simulator_state(init_state.env_state, use_log_traj=False)]
-    frames = []
-    for i in range(remaining_timesteps):
-        if i % 1 == 0:
-            # state = jax.tree.map(lambda x: x[i] if len(x.shape) > 0 else x, states)
-            state = jax.tree.map(lambda x: x[i], states)
-            # Print all leaf names
-            frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False))
-    
+    frames = {}
+
+    if config.RANDOM_AGENT:
+        agents = ['random']
+    else:
+        agents = env.agents
+
     os.makedirs(config._vid_dir, exist_ok=True)
 
-    if config.random_agent:
-        vid_path = os.path.join(config._vid_dir, f"enjoy_random_agent.gif")
-    else:
-        vid_path = os.path.join(config._vid_dir, f"enjoy_{latest_update_step}.gif")
-    imageio.mimsave(vid_path, frames, fps=10, loop=0)
+    for j, agent in enumerate(agents):
+        frames = []
+        for i in range(remaining_timesteps):
+            if i % 1 == 0:
+                # state = jax.tree.map(lambda x: x[i] if len(x.shape) > 0 else x, states)
+                state = jax.tree.map(lambda x: x[i], states)
+                # Print all leaf names
+                frames.append(
+                    visualization.plot_simulator_state(
+                        state.env_state, use_log_traj=False,
+                        viz_config=VizConfig(
+                            center_agent_idx=j).__dict__
+                        )
+                    )
+
+        vid_path = os.path.join(config._vid_dir, f"render_update-{latest_update_step}_{agent}.gif")
+        imageio.mimsave(vid_path, frames, fps=10, loop=0)
 
     
 if __name__ == '__main__':
-    enjoy()
+    render()
 
 

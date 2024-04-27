@@ -37,6 +37,7 @@ class Config:
     OVERWRITE: bool = False
     CKPT_FREQ: int = 50
     RENDER_FREQ: int = 50
+    EXP_NAME: Optional[str] = None
 
     # ENV_KWARGS: dict = {}  # Use a subconfig for this if we really need it
     OFFROAD: float = -1.0
@@ -62,10 +63,10 @@ class Config:
 
     
 @dataclass
-class EnjoyConfig(Config):
-    random_agent: bool = False
+class RenderConfig(Config):
+    RANDOM_AGENT: bool = False
 
 
 cs = ConfigStore.instance()
 cs.store(name="config", node=Config)
-cs.store(name="enjoy", node=EnjoyConfig)
+cs.store(name="render", node=RenderConfig)

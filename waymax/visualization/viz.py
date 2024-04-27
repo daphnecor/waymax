@@ -313,7 +313,7 @@ def plot_simulator_state(
   if viz_config.center_agent_idx == -1:
     xy = current_xy[state.object_metadata.is_sdc]
   else:
-    xy = current_xy[viz_config.center_agent_idx]
+    xy = current_xy[viz_config.center_agent_idx][None]
   origin_x, origin_y = xy[0, :2]
   ax.axis((
       origin_x - viz_config.back_x,

@@ -328,7 +328,8 @@ def get_exp_dir(config: Config):
     reward_str = f"offroad_{config.OFFROAD}_overlap_{config.OVERLAP}_log_divergence_{config.LOG_DIVERGENCE}"
     exp_dir = os.path.join(
         'saves',
-        f"{config.SEED}"
+        f"{(f'{reward_str}_' if reward_str != 'None' else '')}" + \
+        f"{config.EXP_NAME}_{config.SEED}"
     )
     return exp_dir
 
