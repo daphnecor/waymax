@@ -40,138 +40,23 @@ class Transition(NamedTuple):
     avail_actions: jnp.ndarray
 
 
-def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wandb_run_id):
-    _render_callback = partial(render_callback, save_dir=config.vid_dir)
-
-    # t_start_up_start = perf_counter()
-   
-    # # Configure dataset
-    # t_data_iter_start = perf_counter()
-    # dataset_config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=max_num_objects)
-    # data_iter = dataloader.simulator_state_generator(config=dataset_config)
-    
-    # t_data_iter_end = perf_counter()
-    
-    # t_next_start = perf_counter()
-    
-    # scenario = next(data_iter)
-    
-    # t_next_end = perf_counter() 
-    
-    # dynamics_model = dynamics.InvertibleBicycleModel()
-
-    # # Create waymax environment
-    # waymax_base_env = _env.MultiAgentEnvironment(
-    #     dynamics_model=dynamics_model,
-    #     config=dataclasses.replace(
-    #         _config.EnvironmentConfig(),
-    #         max_num_objects=max_num_objects,
-    #         controlled_object=_config.ObjectType.VALID,
-    #     ),
-    # )
-    # # Wrap environment with JAXMARL wrapper
-    # env = WaymaxWrapper(waymax_base_env, obs_with_agent_id=False)
-
-    # # Wrap environment with LogWrapper
-    # env = WaymaxLogWrapper(env)
-
-    # # Configure training
-    # config.NUM_ACTORS = env.num_agents * config.NUM_ENVS
-    # config.NUM_UPDATES = (
-    #     config["TOTAL_TIMESTEPS"] // config.NUM_STEPS // config["NUM_ENVS"]
-    # )
-    # config.MINIBATCH_SIZE = (
-    #     config["NUM_ACTORS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
-    # )
-    # config["CLIP_EPS"] = (
-    #     config["CLIP_EPS"] / env.num_agents
-    #     if config["SCALE_CLIP_EPS"]
-    #     else config["CLIP_EPS"]
-    # )
- 
-    # t_start_up_end = perf_counter()
-    
-    # print(f"--- TOTAL STARTUP COSTS (make data_iter + env) = {t_start_up_end - t_start_up_start} s ---")
-    # print(f" of which \n")
-    # print(f"--- DATA ITER COSTS = {t_data_iter_end - t_data_iter_start} s ---")
-    # print(f"--- NEXT DATA ITER COSTS = {t_next_end - t_next_start} s ---")
- 
+def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
+               actor_network, env, scenario, latest_update_step, wandb_run_id):
+    _render_callback = partial(render_callback, save_dir=config._vid_dir)
 
     def train(rng, runner_state=None):
 
         # INIT ENV
         rng, _rng = jax.random.split(rng)
-        # reset_rng = jax.random.split(_rng, config.NUM_ENVS)
-        # obsv, env_state = jax.vmap(env.reset, in_axes=(None, 0))(scenario, reset_rng)
-        # ac_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], 128)
-        # cr_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], 128)
 
         # INIT NETWORK
-        actor_network = ActorRNN(env.action_space(env.agents[0]).shape[0], config=config)
         critic_network = CriticRNN(config=config)
 
         jit_sim_render_episode = make_sim_render_episode(config, actor_network, env, scenario)
         num_render_actors = 1 * env.num_agents
-        ac_init_hstate_render = ScannedRNN.initialize_carry(num_render_actors, 128)
+        ac_init_hstate_render = ScannedRNN.initialize_carry(num_render_actors, config.HIDDEN_DIM)
         render_states = jit_sim_render_episode(runner_state.train_states[0].params, ac_init_hstate_render)
         jax.experimental.io_callback(_render_callback, None, states=render_states, t=0)
-
-        # if runner_state is None:
-        #     rng, _rng_actor, _rng_critic = jax.random.split(rng, 3)
-        #     ac_init_x = (
-        #         jnp.zeros((1, config["NUM_ENVS"], env.observation_space(env.agents[0]).shape[0])),
-        #         jnp.zeros((1, config["NUM_ENVS"])),
-        #         jnp.zeros((1, config["NUM_ENVS"], env.action_space(env.agents[0]).shape[0])),
-        #     )
-        #     ac_init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], config["GRU_HIDDEN_DIM"])
-        #     actor_network_params = actor_network.init(_rng_actor, ac_init_hstate, ac_init_x)
-        #     cr_init_x = (
-        #         jnp.zeros((1, config["NUM_ENVS"], env.world_state_size(),)),  
-        #         jnp.zeros((1, config["NUM_ENVS"])),
-        #     )
-        #     cr_init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], config["GRU_HIDDEN_DIM"])
-        #     critic_network_params = critic_network.init(_rng_critic, cr_init_hstate, cr_init_x)
-
-        #     _linear_schedule = partial(linear_schedule, config)
-            
-        #     if config["ANNEAL_LR"]:
-        #         actor_tx = optax.chain(
-        #             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-        #             optax.adam(learning_rate=_linear_schedule, eps=1e-5),
-        #         )
-        #         critic_tx = optax.chain(
-        #             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-        #             optax.adam(learning_rate=_linear_schedule, eps=1e-5),
-        #         )
-        #     else:
-        #         actor_tx = optax.chain(
-        #             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-        #             optax.adam(config["LR"], eps=1e-5),
-        #         )
-        #         critic_tx = optax.chain(
-        #             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-        #             optax.adam(config["LR"], eps=1e-5),
-        #         )
-        #     actor_train_state = TrainState.create(
-        #         apply_fn=actor_network.apply,
-        #         params=actor_network_params,
-        #         tx=actor_tx,
-        #     ) itic_train_state = TrainState.create(
-        #         apply_fn=actor_network.apply,
-        #         params=critic_network_params,
-        #         tx=critic_tx,
-        #     )
-
-
-        #     rng, _rng = jax.random.split(rng)
-        #     runner_state = RunnerState(
-        #         (actor_train_state, critic_train_state),
-        #         env_state,
-        #         obsv,
-        #         jnp.zeros((config.NUM_ACTORS), dtype=bool, ),
-        #         (ac_init_hstate, cr_init_hstate),
-        #         _rng,
-        #     )
 
         # TRAIN LOOP
         # def _update_step(update_runner_state, unused):
@@ -190,9 +75,9 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                 rng, _rng = jax.random.split(rng)
                 avail_actions = jax.vmap(env.get_avail_actions)(env_state.env_state)
                 avail_actions = jax.lax.stop_gradient(
-                    batchify(avail_actions, env.agents, config["NUM_ACTORS"])
+                    batchify(avail_actions, env.agents, config._num_actors)
                 )
-                obs_batch = batchify(last_obs, env.agents, config["NUM_ACTORS"])
+                obs_batch = batchify(last_obs, env.agents, config._num_actors)
                 ac_in = (
                     obs_batch[np.newaxis, :],
                     last_done[np.newaxis, :],
@@ -203,7 +88,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
                 env_act = unbatchify(
-                    action, env.agents, config["NUM_ENVS"], env.num_agents
+                    action, env.agents, config.NUM_ENVS, env.num_agents
                 )
                 env_act = {k: v.squeeze() for k, v in env_act.items()}
 
@@ -211,7 +96,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                 # output of wrapper is (num_envs, num_agents, world_state_size)
                 # swap axes to (num_agents, num_envs, world_state_size) before reshaping to (num_actors, world_state_size)
                 world_state = last_obs["world_state"].swapaxes(0,1)  
-                world_state = world_state.reshape((config["NUM_ACTORS"],-1))
+                world_state = world_state.reshape((config._num_actors,-1))
                 
                 cr_in = (
                     world_state[None, :],
@@ -225,14 +110,14 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                 obsv, env_state, reward, done, info = jax.vmap(
                     env.step, in_axes=(0, 0, 0, None)
                 )(rng_step, env_state, env_act, scenario)
-                info = jax.tree.map(lambda x: x.reshape((config["NUM_ACTORS"])), info)
-                done_batch = batchify(done, env.agents, config["NUM_ACTORS"]).squeeze()
+                info = jax.tree.map(lambda x: x.reshape((config._num_actors)), info)
+                done_batch = batchify(done, env.agents, config._num_actors).squeeze()
                 transition = Transition(
                     jnp.tile(done["__all__"], env.num_agents),
                     last_done,
                     action.squeeze(),
                     value.squeeze(),
-                    batchify(reward, env.agents, config["NUM_ACTORS"]).squeeze(),
+                    batchify(reward, env.agents, config._num_actors).squeeze(),
                     log_prob.squeeze(),
                     obs_batch,
                     world_state,
@@ -255,7 +140,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                                                                             runner_state.hstates, runner_state.rng)
             
             last_world_state = last_obs["world_state"].swapaxes(0,1)
-            last_world_state = last_world_state.reshape((config["NUM_ACTORS"],-1))
+            last_world_state = last_world_state.reshape((config._num_actors,-1))
             
             cr_in = (
                 last_world_state[None, :],
@@ -382,7 +267,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                 rng, _rng = jax.random.split(rng)
 
                 init_hstates = jax.tree.map(lambda x: jnp.reshape(
-                    x, (1, config["NUM_ACTORS"], -1)
+                    x, (1, config._num_actors, -1)
                 ), init_hstates)
                 
                 batch = (
@@ -392,7 +277,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                     advantages.squeeze(),
                     targets.squeeze(),
                 )
-                permutation = jax.random.permutation(_rng, config["NUM_ACTORS"])
+                permutation = jax.random.permutation(_rng, config._num_actors)
 
                 shuffled_batch = jax.tree_util.tree_map(
                     lambda x: jnp.take(x, permutation, axis=1), batch
@@ -485,7 +370,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
             jax.experimental.io_callback(callback, None, metric)
             update_steps = update_steps + 1
             runner_state = RunnerState(train_states, env_state, last_obs, last_done, hstates, rng)
-            do_render = update_steps % config.render_freq == 0
+            do_render = update_steps % config.RENDER_FREQ == 0
             render_states = jax.lax.cond(
                 do_render,
                 partial(jit_sim_render_episode, runner_state.train_states[0].params, ac_init_hstate_render),
@@ -497,7 +382,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
                 lambda: None,
             )
             jax.lax.cond(
-                update_steps % config.ckpt_freq == 0,
+                update_steps % config.CKPT_FREQ == 0,
                 partial(jax.experimental.io_callback, ckpt_callback, None, metric, runner_state),
                 lambda: None,
             )
@@ -508,7 +393,7 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
         runner_state, metric = jax.lax.scan(
             _update_step, 
             # _update_step, 
-            (runner_state, latest_update_step), None, config.NUM_UPDATES - latest_update_step
+            (runner_state, latest_update_step), None, config._num_updates - latest_update_step
         )
         return {"runner_state": runner_state}
 
@@ -518,17 +403,17 @@ def make_train(config, checkpoint_manager, env, scenario, latest_update_step, wa
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(config: Config):
     init_config(config)
-    if config.overwrite:
-        shutil.rmtree(config.exp_dir, ignore_errors=True)
+    if config.OVERWRITE:
+        shutil.rmtree(config._exp_dir, ignore_errors=True)
 
     options = ocp.CheckpointManagerOptions(
         max_to_keep=2, create=True)
     checkpoint_manager = ocp.CheckpointManager(
-        config.ckpt_dir, options=options)
+        config._ckpt_DIR, options=options)
 
     rng = jax.random.PRNGKey(config.SEED)
     latest_update_step = checkpoint_manager.latest_step()
-    runner_state, env, scenario, latest_update_step = \
+    runner_state, actor_network, env, scenario, latest_update_step = \
         init_run(config, checkpoint_manager, latest_update_step, rng)
 
     if latest_update_step is not None:
@@ -539,24 +424,25 @@ def main(config: Config):
 
     latest_update_step = 0 if latest_update_step is None else latest_update_step
 
-    os.makedirs(config.exp_dir, exist_ok=True)
-    os.makedirs(config.vid_dir, exist_ok=True)
+    os.makedirs(config._exp_dir, exist_ok=True)
+    os.makedirs(config._vid_dir, exist_ok=True)
 
     run = wandb.init(
         # entity=config.ENTITY,
         project=config.PROJECT,
-        tags=["MAPPO", config.MAP_NAME],
+        tags=["MAPPO"],
         config=OmegaConf.to_container(config),
         mode=config.WANDB_MODE,
-        dir=config.exp_dir,
+        dir=config._exp_dir,
         id=wandb_run_id,
         resume=wandb_resume,
     )
     wandb_run_id = run.id
-    with open(os.path.join(config.exp_dir, "wandb_run_id.txt"), "w") as f:
+    with open(os.path.join(config._exp_dir, "wandb_run_id.txt"), "w") as f:
         f.write(wandb_run_id)
     with jax.disable_jit(False):
-        train_jit = jax.jit(make_train(config, checkpoint_manager, env=env, scenario=scenario,
+        train_jit = jax.jit(make_train(config, checkpoint_manager, env=env, actor_network=actor_network,
+                                       scenario=scenario,
                                        latest_update_step=latest_update_step, wandb_run_id=run.id)) 
         out = train_jit(rng, runner_state=runner_state)
 

@@ -24,6 +24,7 @@ from waymax import env as _env
 from waymax import agents
 from waymax import visualization
 from waymax.datatypes.action import Action
+from waymax.datatypes import roadgraph
 from waymax.datatypes.simulator_state import SimulatorState
 
 
@@ -87,6 +88,9 @@ class WaymaxLogWrapper(JaxMARLWrapper):
 
 
 
+OBSERVE_ROADGRAPH = False
+
+
 class WaymaxWrapper(JaxMARLWrapper):
     """
     Provides a `"world_state"` observation for the centralised critic.
@@ -104,18 +108,24 @@ class WaymaxWrapper(JaxMARLWrapper):
             f'object_{i}' for i in range(self.num_agents)
         ]
         
-        self._state_size = 6
+        self._agent_state_size = 6
+
+        if OBSERVE_ROADGRAPH:
+            self._roadgraph_size = 20_000 * 2  # 40_000
+        else:
+            self._roadgraph_size = 0
+
         self.world_state_fn = self.ws_just_env_state
 
         if not self.obs_with_agent_id:
-            self._world_state_size = self._state_size * self.num_agents
+            self._world_state_size = self._agent_state_size * self.num_agents + self._roadgraph_size
             self.world_state_fn = self.ws_just_env_state
         else:
-            self._world_state_size = self._state_size * self.num_agents + self.num_agents
+            self._world_state_size = self._agent_state_size * self.num_agents + self._roadgraph_size + self.num_agents
             self.world_state_fn = self.ws_with_agent_id
 
         self.observation_spaces = {
-            i: Box(low=-1, high=1.0, shape=(self._state_size * self.num_agents + self.num_agents,)) for i in self.agents
+            i: Box(low=-1, high=1.0, shape=(self._agent_state_size * self.num_agents + self._roadgraph_size + self.num_agents,)) for i in self.agents
         }
         self.action_spaces = {
             i: Box(low=-1, high=1.0, shape=(2,)) for i in self.agents 
@@ -131,29 +141,63 @@ class WaymaxWrapper(JaxMARLWrapper):
 
     @partial(jax.jit, static_argnums=0)
     def get_obs(env, env_state):
+
         traj = datatypes.dynamic_index(
             env_state.sim_trajectory, env_state.timestep, axis=-1, keepdims=True
         )
+        valid = traj.valid
+
+        if OBSERVE_ROADGRAPH:
+            # The absolute road points
+            roadgraph_points = env_state.roadgraph_points
+            roadgraph_points_xy = roadgraph_points.xy
+            # for i in range(env.config.max_num_objects):
+
+            # rg_obs = {roadgraph.filter_topk_roadgraph_points(
+            #     roadgraph_points, env_state.sim_trajectory.xy[i, 10], topk=10
+            # ) for i in range(env.config.max_num_objects
+            # )}
+            # for agent in env.agents:
+            #     global_rg = roadgraph.filter_topk_roadgraph_points(
+            #         env_state.roadgraph_points,
+            #         env_state.sim_trajectory.xy[i, 10],
+            #         topk=10,
+            #     )
+        
+        else:
+            roadgraph_points_xy = jnp.zeros((0, 2))
+            
+        
+        # Shape is (2000, 2)
+        valid_roadgraph_points_xy = roadgraph_points_xy
+
         world_state = jnp.concatenate(
-        (traj.xy, traj.yaw[..., None], traj.vel_x[..., None], traj.vel_y[..., None], traj.vel_yaw[..., None]), axis=-1
-        )[:, 0]
+        (traj.xy.reshape(-1), traj.yaw.reshape(-1), traj.vel_x.reshape(-1), traj.vel_y.reshape(-1),
+         traj.vel_yaw.reshape(-1), valid_roadgraph_points_xy.reshape(-1)), axis=0
+        )
         agent_ids = jnp.eye(env.num_agents)
+        # world_state_w_ids = jnp.concatenate((world_state, agent_ids), axis=-1)
+        # world_state_w_ids = world_state_w_ids[valid]
         obs = {
-            agent: jnp.concatenate((world_state, agent_ids[i][..., None]), axis=-1)
+            agent: jnp.concatenate((world_state, agent_ids[i]), axis=0)
             for i, agent in enumerate(env.agents)
         }
         obs.update(
             {
-                "world_state": world_state[None].repeat(env.num_agents, axis=0)
+                "world_state": world_state.repeat(env.num_agents, axis=0),
             }
         )
         return obs
         
 
-    def get_avail_actions(self, env_state):
-        """TODO: Add me."""
+    def get_avail_actions(self, state: SimulatorState):
+        traj = datatypes.dynamic_index(
+                state.sim_trajectory, state.timestep, axis=-1, keepdims=True
+        )
+        valid = traj.valid
         return {
-            agent: jnp.ones((2,)) for agent in self.agents
+            # agent: jnp.ones((2,)) for i, agent in enumerate(self.agents) if valid[i]
+            agent: jnp.ones((2,)) for i, agent in enumerate(self.agents)
         }
 
     
@@ -176,6 +220,10 @@ class WaymaxWrapper(JaxMARLWrapper):
         scenario
     ) -> Tuple[Dict[str, chex.Array], SimulatorState, Dict[str, float], Dict[str, bool], Dict]:
         """Performs step transitions in the environment."""
+        # traj = datatypes.dynamic_index(
+        #         state.sim_trajectory, state.timestep, axis=-1, keepdims=True
+        # )
+        # valid = traj.valid
 
         # key, key_reset = jax.random.split(key)
         obs_st, states_st, rewards, dones, infos = self.step_env(state, actions)
@@ -210,8 +258,11 @@ class WaymaxWrapper(JaxMARLWrapper):
         info = {}
         obs = self.get_obs(env_state)
         done = {'__all__': env_state.is_done}
+
+        # TODO: Is this right? Is there something attached to the env_state if a controlled agent has e.g. gone out of bounds?
+        #   Or does the `valid` value associated with an agent potentially change over the course of an episode?
         done.update(
-            {agent: valid_i for agent, valid_i in zip(self.agents, valid)}
+            {agent: True for agent, valid_i in zip(self.agents, valid)}
         )
         return obs, env_state, reward, done, info
 

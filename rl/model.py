@@ -18,34 +18,64 @@ import orbax.checkpoint as ocp
 from flax.training.train_state import TrainState
 import distrax
 
+from rl.config.config import Config
+
 
 class ActorRNN(nn.Module):
     action_dim: Sequence[int]
-    config: Dict
+    config: Config
 
     @nn.compact
     def __call__(self, hidden, x):
         obs, dones, avail_actions = x
         embedding = nn.Dense(
-            self.config["FC_DIM_SIZE"], kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            self.config.HIDDEN_DIM, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(obs)
         embedding = nn.relu(embedding)
 
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN()(hidden, rnn_in)
 
-        actor_mean = nn.Dense(self.config["GRU_HIDDEN_DIM"], kernel_init=orthogonal(2), bias_init=constant(0.0))(
+        actor_mean = nn.Dense(self.config.HIDDEN_DIM, kernel_init=orthogonal(2), bias_init=constant(0.0))(
             embedding
         )
         actor_mean = nn.relu(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
+        actor_mean = (nn.sigmoid(actor_mean) - 0.5) * 2
         unavail_actions = 1 - avail_actions
 
+        actor_mean = actor_mean - (unavail_actions * 1e10)
+
+        return actor_mean
+
+
+class ActorMLP(nn.Module):
+    action_dim: Sequence[int]
+    config: Config
+
+    @nn.compact
+    def __call__(self, _, x):
+        obs, dones, avail_actions = x
+        x = Dense(self.action_dim, self.config.HIDDEN_DIM, 'relu')(x)
+        actor_mean = (nn.sigmoid(x) - 0.5) * 2
+        unavail_actions = 1 - avail_actions
+
+        actor_mean = actor_mean - (unavail_actions * 1e10)
+
+        return actor_mean
+
+
+class ActorBox(nn.Module):
+    action_dim: Sequence[int]
+    subnet: nn.Module
+
+    @nn.compact
+    def __call__(self, hidden, x):
+        actor_mean = self.subnet.__call__(hidden, x)
         # action_logits = actor_mean - (unavail_actions * 1e10)
         # pi = distrax.Categorical(logits=action_logits)
-        actor_mean = actor_mean - (unavail_actions * 1e10)
         actor_logtstd = self.param('log_std', nn.initializers.zeros, (self.action_dim,))
         pi = distrax.MultivariateNormalDiag(actor_mean, jnp.exp(actor_logtstd))
 
@@ -59,14 +89,14 @@ class CriticRNN(nn.Module):
     def __call__(self, hidden, x):
         world_state, dones = x
         embedding = nn.Dense(
-            self.config["FC_DIM_SIZE"], kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            self.config.HIDDEN_DIM, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(world_state)
         embedding = nn.relu(embedding)
         
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN()(hidden, rnn_in)
         
-        critic = nn.Dense(self.config["GRU_HIDDEN_DIM"], kernel_init=orthogonal(2), bias_init=constant(0.0))(
+        critic = nn.Dense(self.config.HIDDEN_DIM, kernel_init=orthogonal(2), bias_init=constant(0.0))(
             embedding
         )
         critic = nn.relu(critic)

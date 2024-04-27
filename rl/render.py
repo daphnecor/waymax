@@ -28,17 +28,15 @@ def enjoy(config: EnjoyConfig):
     options = ocp.CheckpointManagerOptions(
         max_to_keep=2, create=True)
     checkpoint_manager = ocp.CheckpointManager(
-        config.ckpt_dir, options=options)
+        config._ckpt_DIR, options=options)
     runner_state: RunnerState
     env: WaymaxWrapper
     latest_update_step = checkpoint_manager.latest_step()
-    runner_state, env, scenario, latest_update_step = \
+    runner_state, actor_network, env, scenario, latest_update_step = \
         init_run(config, checkpoint_manager, latest_update_step, rng)
 
     if not config.random_agent:
         runner_state, _ = restore_run(config, runner_state, checkpoint_manager, latest_update_step)
-
-    actor_network = ActorRNN(env.action_space(env.agents[0]).shape[0], config=config)
 
     rng = jax.random.PRNGKey(0)
     init_obs, init_state = env.reset(scenario, rng)
@@ -113,12 +111,12 @@ def enjoy(config: EnjoyConfig):
             # Print all leaf names
             frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False))
     
-    os.makedirs(config.vid_dir, exist_ok=True)
+    os.makedirs(config._vid_dir, exist_ok=True)
 
     if config.random_agent:
-        vid_path = os.path.join(config.vid_dir, f"enjoy_random_agent.gif")
+        vid_path = os.path.join(config._vid_dir, f"enjoy_random_agent.gif")
     else:
-        vid_path = os.path.join(config.vid_dir, f"enjoy_{latest_update_step}.gif")
+        vid_path = os.path.join(config._vid_dir, f"enjoy_{latest_update_step}.gif")
     imageio.mimsave(vid_path, frames, fps=10, loop=0)
 
     

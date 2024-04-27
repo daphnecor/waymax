@@ -12,14 +12,14 @@ from dataclasses import dataclass
 @dataclass
 class Config:
     LR: float = 0.001
-    BATCH_SIZE: int = 1024
+    BATCH_SIZE: int = 32
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
     NUM_ENVS: int = 128
     NUM_STEPS: int = 128 
     TOTAL_TIMESTEPS: float = 1e7
-    FC_DIM_SIZE: int = 128
-    GRU_HIDDEN_DIM: int = 128
+    HIDDEN_DIM: int = 128
+    HIDDEN_DIM: int = 128
     UPDATE_EPOCHS: int = 4
     NUM_MINIBATCHES: int = 4
     GAMMA: float = 0.99
@@ -31,30 +31,34 @@ class Config:
     MAX_GRAD_NORM: float = 0.25
     ACTIVATION: str = 'relu'
     OBS_WITH_AGENT_ID: bool = True
-    MAP_NAME: str = '2s3z'
+    # MAP_NAME: str = '2s3z'
     SEED: int = 0
-    # ENV_KWARGS: dict = {} 
     ANNEAL_LR: bool = False
-    overwrite: bool = False
-    ckpt_freq: int = 50
-    render_freq: int = 50
+    OVERWRITE: bool = False
+    CKPT_FREQ: int = 50
+    RENDER_FREQ: int = 50
+
+    # ENV_KWARGS: dict = {}  # Use a subconfig for this if we really need it
+    OFFROAD: float = -1.0
+    OVERLAP: float = 0.0
+    LOG_DIVERGENCE: float = 0.0
 
     # WandB Params
-    WANDB_MODE: str = 'run'
+    WANDB_MODE: str = 'run'  # one of: 'offline', 'run', 'dryrun', 'shared', 'disabled', 'online'
     ENTITY: str = ""
     PROJECT: str = 'waymax_saphne'
 
     # DO NOT CHANGE THIS. It is dark magic?
-    max_num_objects: int = 32
+    MAX_NUM_OBJECTS: int = 8
 
 
     # DO NOT CHANGE THESE. They will be set automatically in the code.
-    NUM_ACTORS: int = -1
-    MINIBATCH_SIZE: int = -1
-    NUM_UPDATES: int = -1
-    exp_dir: str = ""
-    ckpt_dir: str = ""
-    vid_dir: str = ""
+    _num_actors: int = -1
+    _minibatch_size: int = -1
+    _num_updates: int = -1
+    _exp_dir: str = ""
+    _ckpt_DIR: str = ""
+    _vid_dir: str = ""
 
     
 @dataclass

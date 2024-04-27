@@ -26,7 +26,7 @@ from time import perf_counter
 from rl.config.config import Config
 from rl.environments.spaces import Box
 from rl.environments.multi_agent_env import MultiAgentEnv
-from rl.model import ActorRNN, CriticRNN, ScannedRNN
+from rl.model import ActorMLP, ActorRNN, ActorBox, CriticRNN, ScannedRNN
 from rl.wrappers.baselines import JaxMARLWrapper, LogWrapper
 from waymax import config as _config
 from waymax import dataloader
@@ -78,7 +78,7 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     t_start_up_start = perf_counter()
     
     # HACK when debugging with one scenario to avoid long loading time for data iterator
-    scenario_name = f"scenario_{config.max_num_objects}-max-objects.pkl"
+    scenario_name = f"scenario_{config.MAX_NUM_OBJECTS}-max-objects.pkl"
     if DEBUG_WITH_ONE_SCENARIO and os.path.isfile(scenario_name):
         t_data_iter_start = perf_counter()
         t_next_start = perf_counter()
@@ -90,7 +90,7 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     else:
         # Configure dataset
         t_data_iter_start = perf_counter()
-        dataset_config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=config.max_num_objects)
+        dataset_config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=config.MAX_NUM_OBJECTS)
         data_iter = dataloader.simulator_state_generator(config=dataset_config)
         t_data_iter_end = perf_counter()
     
@@ -101,17 +101,19 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
         with open(scenario_name, "wb") as f:
             pickle.dump(scenario, f)
     
-    dynamics_model = dynamics.InvertibleBicycleModel()
+    dynamics_model = dynamics.InvertibleBicycleModel(
+        normalize_actions=True,  # This means we feed in all actions as in [-1, 1]
+    )
 
     # Create env config
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
-        max_num_objects=config.max_num_objects,
+        max_num_objects=config.MAX_NUM_OBJECTS,
         rewards=_config.LinearCombinationRewardConfig(
             {
-                # 'overlap': -1.0, 
-                # 'offroad': -1.0, 
-                'log_divergence': 1.0
+                'offroad': config.OFFROAD,
+                'overlap': config.OVERLAP, 
+                'log_divergence': config.LOG_DIVERGENCE,
             }
         ),
         #metrics={}
@@ -131,12 +133,12 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     env = WaymaxLogWrapper(env)
 
     # Configure training
-    config.NUM_ACTORS = env.num_agents * config.NUM_ENVS
-    config.NUM_UPDATES = int(
+    config._num_actors = env.num_agents * config.NUM_ENVS
+    config._num_updates = int(
         config["TOTAL_TIMESTEPS"] // config.NUM_STEPS // config["NUM_ENVS"]
     )
-    config.MINIBATCH_SIZE = (
-        config["NUM_ACTORS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
+    config._minibatch_size = (
+        config._num_actors * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
     )
     config["CLIP_EPS"] = (
         config["CLIP_EPS"] / env.num_agents
@@ -151,7 +153,10 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     print(f"--- DATA ITER COSTS = {t_data_iter_end - t_data_iter_start} s ---")
     print(f"--- NEXT DATA ITER COSTS = {t_next_end - t_next_start} s ---")
 
-    actor_network = ActorRNN(env.action_space(env.agents[0]).shape[0], config=config)
+    actor_network = ActorBox(env.action_space(env.agents[0]).shape[0],
+                             subnet=ActorRNN(env.action_space(env.agents[0]).shape[0], config=config,
+                            #  subnet=ActorMLP(env.action_space(env.agents[0]).shape[0], config=config,
+                                             ))
     critic_network = CriticRNN(config=config)
     rng, _rng_actor, _rng_critic = jax.random.split(rng, 3)
     ac_init_x = (
@@ -159,13 +164,17 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
         jnp.zeros((1, config["NUM_ENVS"])),
         jnp.zeros((1, config["NUM_ENVS"], env.action_space(env.agents[0]).shape[0])),
     )
-    ac_init_hstate = ScannedRNN.initialize_carry(config.NUM_ENVS, config["GRU_HIDDEN_DIM"])
+    # ac_init_hstate = ScannedRNN.initialize_carry(config.NUM_ENVS, config["HIDDEN_DIM"])
+    ac_init_hstate = ScannedRNN.initialize_carry(config.NUM_ENVS, config.HIDDEN_DIM)
     actor_network_params = actor_network.init(_rng_actor, ac_init_hstate, ac_init_x)
+
+    print(actor_network.subnet.tabulate(rngs=_rng_actor, x=ac_init_x, hidden=ac_init_hstate))
+
     cr_init_x = (
         jnp.zeros((1, config["NUM_ENVS"], env.world_state_size(),)),  
         jnp.zeros((1, config["NUM_ENVS"])),
     )
-    cr_init_hstate = ScannedRNN.initialize_carry(config.NUM_ENVS, config["GRU_HIDDEN_DIM"])
+    cr_init_hstate = ScannedRNN.initialize_carry(config.NUM_ENVS, config.HIDDEN_DIM)
     critic_network_params = critic_network.init(_rng_critic, cr_init_hstate, cr_init_x)
 
     _linear_schedule = partial(linear_schedule, config)
@@ -203,27 +212,29 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     rng, _rng = jax.random.split(rng)
     reset_rng = jax.random.split(_rng, config.NUM_ENVS)
     obsv, env_state = jax.vmap(env.reset, in_axes=(None, 0))(scenario, reset_rng)
-    ac_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], 128)
-    cr_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], 128)
+    ac_init_hstate = ScannedRNN.initialize_carry(config._num_actors, config.HIDDEN_DIM)
+    cr_init_hstate = ScannedRNN.initialize_carry(config._num_actors, config.HIDDEN_DIM)
 
     rng, _rng = jax.random.split(rng)
     runner_state = RunnerState(
         (actor_train_state, critic_train_state),
         env_state,
         obsv,
-        jnp.zeros((config.NUM_ACTORS), dtype=bool, ),
+        jnp.zeros((config._num_actors), dtype=bool, ),
         (ac_init_hstate, cr_init_hstate),
         _rng,
     )
 
-    return runner_state, env, scenario, latest_update_step
+    return runner_state, actor_network, env, scenario, latest_update_step
 
 
 def restore_run(config: Config, runner_state: RunnerState, ckpt_manager, latest_update_step: int):
     if latest_update_step is not None:
         runner_state = ckpt_manager.restore(latest_update_step, args=ocp.args.StandardRestore(runner_state))
-        with open(os.path.join(config.exp_dir, "wandb_run_id.txt"), "r") as f:
+        with open(os.path.join(config._exp_dir, "wandb_run_id.txt"), "r") as f:
             wandb_run_id = f.read()
+    else:
+        wandb_run_id=None
 
     return runner_state, wandb_run_id
 
@@ -313,7 +324,8 @@ def render_callback(states: WaymaxLogEnvState, save_dir: str, t: int):
     wandb.log({"video": wandb.Video(os.path.join(save_dir, f"enjoy_{t}.gif"), fps=10, format="gif")})
 
 
-def get_exp_dir(config):
+def get_exp_dir(config: Config):
+    reward_str = f"offroad_{config.OFFROAD}_overlap_{config.OVERLAP}_log_divergence_{config.LOG_DIVERGENCE}"
     exp_dir = os.path.join(
         'saves',
         f"{config.SEED}"
@@ -321,18 +333,18 @@ def get_exp_dir(config):
     return exp_dir
 
 
-def get_ckpt_dir(config):
-    ckpts_dir = os.path.abspath(os.path.join(config.exp_dir, "ckpts"))
+def get_ckpt_dir(config: Config):
+    ckpts_dir = os.path.abspath(os.path.join(config._exp_dir, "ckpts"))
     return ckpts_dir
 
     
 def init_config(config: Config):
-    config.exp_dir = get_exp_dir(config)
-    config.ckpt_dir = get_ckpt_dir(config)
-    config.vid_dir = os.path.join(config.exp_dir, "vids")
+    config._exp_dir = get_exp_dir(config)
+    config._ckpt_DIR = get_ckpt_dir(config)
+    config._vid_dir = os.path.join(config._exp_dir, "vids")
 
     
-def save_checkpoint(config, ckpt_manager, runner_state, t):
+def save_checkpoint(config: Config, ckpt_manager, runner_state, t):
     ckpt_manager.save(t.item(), args=ocp.args.StandardSave(runner_state))
     ckpt_manager.wait_until_finished() 
 
