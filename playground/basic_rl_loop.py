@@ -30,7 +30,7 @@ def render_frames(states):
 if __name__ == "__main__":
 
     # Config dataset:
-    max_num_objects = 1
+    max_num_objects = 10
 
     config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=max_num_objects)
     data_iter = dataloader.simulator_state_generator(config=config)
@@ -69,8 +69,6 @@ if __name__ == "__main__":
         config=env_config,
     )
     
-    wrapped_env = WaymaxLogWrapper(env)
-    
     # Storage
     rewards = {}
     for agent_idx in range(max_num_objects):
@@ -91,7 +89,7 @@ if __name__ == "__main__":
         is_controlled_func=lambda state: obj_idx > 1,
     )
     
-    actors = [actor_1]
+    actors = [actor_0, actor_1]
     
     jit_step = jax.jit(env.step)
     jit_select_action_list = [jax.jit(actor.select_action) for actor in actors]
