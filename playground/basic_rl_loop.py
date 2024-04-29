@@ -29,7 +29,7 @@ def render_frames(states):
 if __name__ == "__main__":
 
     # Config dataset:
-    max_num_objects = 1
+    max_num_objects = 10
 
     config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=max_num_objects)
     data_iter = dataloader.simulator_state_generator(config=config)
@@ -49,9 +49,12 @@ if __name__ == "__main__":
         max_num_objects=max_num_objects,
         rewards=LinearCombinationRewardConfig(
             {
-                'overlap': -1.0, 
-                'offroad': -1.0, 
-                'log_divergence': 1.0
+                # 'overlap': -1.0, 
+                # 'offroad': -1.0, 
+                # 'log_divergence': 1.0
+                'sdc_progression': 1.0,
+                #'sdc_off_route': 1.0,
+                #'sdc_wrongway': 1.0,
             }
         ),
         #metrics={}
@@ -65,8 +68,6 @@ if __name__ == "__main__":
         config=env_config,
     )
     
-    wrapped_env = WaymaxLogWrapper(env)
-    
     # Storage
     rewards = {}
     for agent_idx in range(max_num_objects):
@@ -76,18 +77,18 @@ if __name__ == "__main__":
     obj_idx = jnp.arange(max_num_objects)
     
     # # Rule-based agents
-    # actor_0 = agents.IDMRoutePolicy(
-    #     is_controlled_func=lambda state: (obj_idx == 0) | (obj_idx == 1)
-    # )
+    actor_0 = agents.IDMRoutePolicy(
+        is_controlled_func=lambda state: (obj_idx == 0) | (obj_idx == 1)
+    )
 
     # Constant speed actor with predefined fixed speed controlling object 2.
     actor_1 = agents.create_constant_speed_actor(
         speed=5.0,
         dynamics_model=dynamics_model,
-        is_controlled_func=lambda state: obj_idx == 2,
+        is_controlled_func=lambda state: obj_idx > 1,
     )
     
-    actors = [actor_1]
+    actors = [actor_0, actor_1]
     
     jit_step = jax.jit(env.step)
     jit_select_action_list = [jax.jit(actor.select_action) for actor in actors]

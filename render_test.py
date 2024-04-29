@@ -102,7 +102,7 @@ if __name__ == "__main__":
 
     # Render the states!
     for state in states:
-        img = visualization.plot_simulator_state(state, use_log_traj=False)
+        img = visualization.plot_simulator_state(state, use_log_traj=False, highlight_obj=_config.ObjectType.VALID,)
         frames.append(img.T)
     end_sim = perf_counter()
 

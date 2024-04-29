@@ -121,7 +121,7 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
         controlled_object=_config.ObjectType.VALID,
     )
 
-    # Create waymax environment
+    # Create waymax environment#
     waymax_base_env = _env.MultiAgentEnvironment(
         dynamics_model=dynamics_model,
         config=env_config,
@@ -317,8 +317,12 @@ def render_callback(states: WaymaxLogEnvState, save_dir: str, t: int):
             state = jax.tree.map(lambda x: x[i], states)
             state = jax.device_put(state, jax.devices('cpu')[0])
             with jax.disable_jit():
-                frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False,
-                                                                 render_overlaps=False))
+                frames.append(visualization.plot_simulator_state(
+                    state.env_state, 
+                    use_log_traj=False,
+                    render_overlaps=False,
+                    highlight_obj=_config.ObjectType.VALID,
+                ))
 
     imageio.mimsave(os.path.join(save_dir, f"enjoy_{t}.gif"), frames, fps=10, loop=0)
     wandb.log({"video": wandb.Video(os.path.join(save_dir, f"enjoy_{t}.gif"), fps=10, format="gif")})
@@ -348,4 +352,3 @@ def init_config(config: Config):
 def save_checkpoint(config: Config, ckpt_manager, runner_state, t):
     ckpt_manager.save(t.item(), args=ocp.args.StandardSave(runner_state))
     ckpt_manager.wait_until_finished() 
-

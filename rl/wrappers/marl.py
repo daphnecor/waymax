@@ -23,6 +23,7 @@ from waymax import datatypes
 from waymax import env as _env
 from waymax import agents
 from waymax import visualization
+from waymax import config as _config
 from waymax.datatypes.action import Action
 from waymax.datatypes import roadgraph
 from waymax.datatypes.simulator_state import SimulatorState
@@ -188,8 +189,8 @@ class WaymaxWrapper(JaxMARLWrapper):
             }
         )
         
-        jax.debug.breakpoint()
-          
+        #jax.debug.breakpoint()
+ 
         return obs
         
 
@@ -267,8 +268,6 @@ class WaymaxWrapper(JaxMARLWrapper):
         done.update(
             {agent: True for agent, valid_i in zip(self.agents, valid)}
         )
-        
-        jax.debug.breakpoint()
 
         return obs, env_state, reward, done, info
 
@@ -328,7 +327,7 @@ class WaymaxWrapper(JaxMARLWrapper):
 
             return (rng, next_state), next_state
             
-        frames = [visualization.plot_simulator_state(init_state.env_state, use_log_traj=False)]
+        frames = [visualization.plot_simulator_state(init_state.env_state, use_log_traj=False, highlight_obj=_config.ObjectType.VALID,)]
         remaining_timesteps = init_state.env_state.remaining_timesteps
         states = jax.lax.scan(step_env, (rng, init_obs, init_state), None, length=remaining_timesteps, reverse=False, unroll=5)
         for i in range(remaining_timesteps):
