@@ -11,8 +11,6 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
-from flax.linen.initializers import constant, orthogonal
-# from flax.training import orbax_utils
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -104,11 +102,20 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     dynamics_model = dynamics.InvertibleBicycleModel(
         normalize_actions=True,  # This means we feed in all actions as in [-1, 1]
     )
+    
+    # Use relative coordinates
+    obs_config = dataclasses.replace(
+        _config.ObservationConfig(), 
+        coordinate_frame=_config.CoordinateFrame.OBJECT 
+        if config.COORDINATE_FRAME == "OBJECT" else _config.CoordinateFrame.GLOBAL,
+        roadgraph_top_k=config.TOPK_ROADPOINTS,
+    )
 
     # Create env config
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
         max_num_objects=config.MAX_NUM_OBJECTS,
+        observation=obs_config,
         rewards=_config.LinearCombinationRewardConfig(
             {
                 'offroad': config.OFFROAD,
@@ -116,7 +123,6 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
                 'log_divergence': config.LOG_DIVERGENCE,
             }
         ),
-        #metrics={}
         # Controll all valid objects in the scene.
         controlled_object=_config.ObjectType.VALID,
     )

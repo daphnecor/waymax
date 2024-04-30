@@ -43,10 +43,17 @@ if __name__ == "__main__":
     # compatible with this dynamics model.
     dynamics_model = dynamics.StateDynamics()
     
+    # Change coordinates to relative
+    obs_config = dataclasses.replace(
+        _config.ObservationConfig(),
+        coordinate_frame=_config.CoordinateFrame.OBJECT,
+    )
+
     # Create env config
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
         max_num_objects=max_num_objects,
+        observation=obs_config,
         rewards=LinearCombinationRewardConfig(
             {
                 'overlap': -1.0, 

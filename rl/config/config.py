@@ -12,14 +12,13 @@ from dataclasses import dataclass
 @dataclass
 class Config:
     LR: float = 0.001
-    BATCH_SIZE: int = 32
+    BATCH_SIZE: int = 1024
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
     NUM_ENVS: int = 128
     NUM_STEPS: int = 128 
-    TOTAL_TIMESTEPS: float = 1e7
-    HIDDEN_DIM: int = 128
-    HIDDEN_DIM: int = 128
+    TOTAL_TIMESTEPS: float = 4e7
+    HIDDEN_DIM: int = 1024
     UPDATE_EPOCHS: int = 4
     NUM_MINIBATCHES: int = 4
     GAMMA: float = 0.99
@@ -32,21 +31,25 @@ class Config:
     ACTIVATION: str = 'relu'
     OBS_WITH_AGENT_ID: bool = True
     # MAP_NAME: str = '2s3z'
-    SEED: int = 0
+    SEED: int = 1
     ANNEAL_LR: bool = False
     OVERWRITE: bool = False
     CKPT_FREQ: int = 50
     RENDER_FREQ: int = 50
     EXP_NAME: Optional[str] = None
+    
+    # Observations
+    COORDINATE_FRAME: str = 'OBJECT' # Relative coordinate frame
+    TOPK_ROADPOINTS: int = 5
 
     # ENV_KWARGS: dict = {}  # Use a subconfig for this if we really need it
-    OFFROAD: float = -1.0
+    OFFROAD: float = 0.0 #-1.0
     OVERLAP: float = 0.0
-    LOG_DIVERGENCE: float = 0.0
+    LOG_DIVERGENCE: float = 1.0
 
     # WandB Params
     WANDB_MODE: str = 'run'  # one of: 'offline', 'run', 'dryrun', 'shared', 'disabled', 'online'
-    ENTITY: str = ""
+    ENTITY: str = ''
     PROJECT: str = 'waymax_saphne'
 
     # DO NOT CHANGE THIS. It is dark magic?
