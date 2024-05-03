@@ -8,16 +8,15 @@ from dataclasses import dataclass
 #     problem: str = "binary"
 #     representation: str = "nca"
 
-
 @dataclass
 class Config:
     LR: float = 0.001
-    BATCH_SIZE: int = 1024
+    BATCH_SIZE: int = 512
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
-    NUM_ENVS: int = 128
-    NUM_STEPS: int = 128 
-    TOTAL_TIMESTEPS: float = 4e7
+    NUM_ENVS: int = 16
+    NUM_STEPS: int = 256 
+    TOTAL_TIMESTEPS: float = 1e7
     HIDDEN_DIM: int = 1024
     UPDATE_EPOCHS: int = 4
     NUM_MINIBATCHES: int = 4
@@ -35,7 +34,7 @@ class Config:
     ANNEAL_LR: bool = False
     OVERWRITE: bool = False
     CKPT_FREQ: int = 50
-    RENDER_FREQ: int = 50
+    RENDER_FREQ: int = 20
     EXP_NAME: Optional[str] = None
     
     # Observations
@@ -43,18 +42,17 @@ class Config:
     TOPK_ROADPOINTS: int = 5
 
     # ENV_KWARGS: dict = {}  # Use a subconfig for this if we really need it
-    OFFROAD: float = 0.0 #-1.0
-    OVERLAP: float = 0.0
-    LOG_DIVERGENCE: float = 1.0
+    OFFROAD: float = -1.0
+    OVERLAP: float = -1.0
+    LOG_DIVERGENCE: float = 0.0 #2.0
 
     # WandB Params
     WANDB_MODE: str = 'run'  # one of: 'offline', 'run', 'dryrun', 'shared', 'disabled', 'online'
     ENTITY: str = ''
-    PROJECT: str = 'waymax_saphne'
+    PROJECT: str = 'waymax'
 
     # DO NOT CHANGE THIS. It is dark magic?
-    MAX_NUM_OBJECTS: int = 8
-
+    MAX_NUM_OBJECTS: int = 32
 
     # DO NOT CHANGE THESE. They will be set automatically in the code.
     _num_actors: int = -1

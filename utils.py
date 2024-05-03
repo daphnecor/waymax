@@ -326,8 +326,8 @@ def render_callback(states: WaymaxLogEnvState, save_dir: str, t: int):
                 frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False,
                                                                  render_overlaps=False))
 
-    imageio.mimsave(os.path.join(save_dir, f"enjoy_{t}.gif"), frames, fps=10, loop=0)
-    wandb.log({"video": wandb.Video(os.path.join(save_dir, f"enjoy_{t}.gif"), fps=10, format="gif")})
+    imageio.mimsave(os.path.join(save_dir, f"enjoy_{t}.gif"), frames, fps=5, loop=0)
+    wandb.log({"video": wandb.Video(os.path.join(save_dir, f"enjoy_{t}.gif"), fps=5, format="gif")})
 
 
 def get_exp_dir(config: Config):

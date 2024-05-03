@@ -129,7 +129,7 @@ def render(config: RenderConfig):
                     )
 
         vid_path = os.path.join(config._vid_dir, f"render_update-{latest_update_step}_{agent}.gif")
-        imageio.mimsave(vid_path, frames, fps=10, loop=0)
+        imageio.mimsave(vid_path, frames, fps=5, loop=0)
 
     
 if __name__ == '__main__':
