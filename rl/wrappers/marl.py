@@ -29,7 +29,7 @@ from waymax.datatypes.action import Action
 from waymax.datatypes import observation
 from waymax.datatypes import roadgraph
 from waymax.datatypes.simulator_state import SimulatorState
-
+from waymax.datatypes import get_control_mask
 
 @struct.dataclass
 class WaymaxLogEnvState:
@@ -156,11 +156,7 @@ class WaymaxWrapper(JaxMARLWrapper):
                 env_state.sim_trajectory.xy[idx, env_state.timestep],
                 topk=env.config.observation.roadgraph_top_k,
             )
-                        
-            # if env.coordinate_frame == _config.CoordinateFrame.GLOBAL:
-            #     exp_traj = global_traj
-            #     exp_rg = global_rg
-            # elif env.coordinate_frame == _config.CoordinateFrame.OBJECT:
+            
             pose = observation.ObjectPose2D.from_center_and_yaw(
                 xy=env_state.sim_trajectory.xy[idx, env_state.timestep],
                 yaw=env_state.sim_trajectory.yaw[idx, env_state.timestep],
@@ -179,26 +175,12 @@ class WaymaxWrapper(JaxMARLWrapper):
         
             obs[f'object_{idx}'] = agent_obs
 
-        # Shape is (2000, 2)
-        #valid_roadgraph_points_xy = roadgraph_points_xy
-
-        # world_state = jnp.concatenate(
-        # (exp_traj.xy.reshape(-1), exp_traj.yaw.reshape(-1), exp_traj.vel_x.reshape(-1), exp_traj.vel_y.reshape(-1),
-        #  exp_traj.vel_yaw.reshape(-1)), axis=0
-        # )
-        # agent_ids = jnp.eye(env.num_agents)
-        # world_state_w_ids = jnp.concatenate((world_state, agent_ids), axis=-1)
-        # world_state_w_ids = world_state_w_ids[valid]
-        # obs = {
-        #     agent: jnp.concatenate((world_state, agent_ids[i]), axis=0)
-        #     for i, agent in enumerate(env.agents)
-        # }
         obs.update(
             {
                 "world_state": jnp.stack([obs[agent] for agent in env.agents])
             }
         )
-                
+                       
         return obs
         
 
@@ -211,7 +193,10 @@ class WaymaxWrapper(JaxMARLWrapper):
             # agent: jnp.ones((2,)) for i, agent in enumerate(self.agents) if valid[i]
             agent: jnp.ones((2,)) for i, agent in enumerate(self.agents)
         }
-
+        
+    # def get_control_mask(self, state: SimulatorState):
+    #     control_mask = get_control_mask(state.object_metadata, _config.ObjectType.VALID)
+    #     return control_mask
     
     @partial(jax.jit, static_argnums=0)
     def reset(self,

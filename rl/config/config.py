@@ -11,15 +11,15 @@ from dataclasses import dataclass
 @dataclass
 class Config:
     LR: float = 0.001
-    BATCH_SIZE: int = 512
+    BATCH_SIZE: int = 90 #512
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
-    NUM_ENVS: int = 16
-    NUM_STEPS: int = 256 
+    NUM_ENVS: int = 2
+    NUM_STEPS: int = 90 #256 
     TOTAL_TIMESTEPS: float = 1e7
     HIDDEN_DIM: int = 1024
     UPDATE_EPOCHS: int = 4
-    NUM_MINIBATCHES: int = 4
+    NUM_MINIBATCHES: int = 1
     GAMMA: float = 0.99
     GAE_LAMBDA: float = 0.95
     CLIP_EPS: float = 0.2
@@ -39,7 +39,7 @@ class Config:
     
     # Observations
     COORDINATE_FRAME: str = 'OBJECT' # Relative coordinate frame
-    TOPK_ROADPOINTS: int = 5
+    TOPK_ROADPOINTS: int = 1
 
     # ENV_KWARGS: dict = {}  # Use a subconfig for this if we really need it
     OFFROAD: float = -1.0
@@ -52,7 +52,7 @@ class Config:
     PROJECT: str = 'waymax'
 
     # DO NOT CHANGE THIS. It is dark magic?
-    MAX_NUM_OBJECTS: int = 32
+    MAX_NUM_OBJECTS: int = 10
 
     # DO NOT CHANGE THESE. They will be set automatically in the code.
     _num_actors: int = -1

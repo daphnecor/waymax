@@ -140,6 +140,7 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
 
     # Configure training
     config._num_actors = env.num_agents * config.NUM_ENVS
+    
     config._num_updates = int(
         config["TOTAL_TIMESTEPS"] // config.NUM_STEPS // config["NUM_ENVS"]
     )
@@ -170,7 +171,6 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
         jnp.zeros((1, config["NUM_ENVS"])),
         jnp.zeros((1, config["NUM_ENVS"], env.action_space(env.agents[0]).shape[0])),
     )
-    # ac_init_hstate = ScannedRNN.initialize_carry(config.NUM_ENVS, config["HIDDEN_DIM"])
     ac_init_hstate = ScannedRNN.initialize_carry(config.NUM_ENVS, config.HIDDEN_DIM)
     actor_network_params = actor_network.init(_rng_actor, ac_init_hstate, ac_init_x)
 
