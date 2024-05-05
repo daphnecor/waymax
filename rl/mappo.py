@@ -37,6 +37,7 @@ class Transition(NamedTuple):
     world_state: jnp.ndarray
     info: jnp.ndarray
     avail_actions: jnp.ndarray
+    control_mask: jnp.ndarray 
 
 
 def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
@@ -79,12 +80,17 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 avail_actions = jax.lax.stop_gradient(
                     batchify(avail_actions, env.agents, config._num_actors)
                 )
+                control_mask = jax.vmap(env._get_control_mask)(env_state.env_state)
+                
+                # TODO(@dc) BATCHIFY?
+
                 obs_batch = batchify(last_obs, env.agents, config._num_actors)
                 ac_in = (
                     obs_batch[np.newaxis, :],
                     last_done[np.newaxis, :],
                     avail_actions,
                 )
+    
                 ac_hstate, pi = actor_network.apply(train_states[0].params, hstates[0], ac_in)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
@@ -125,6 +131,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                     world_state,
                     info,
                     avail_actions,
+                    control_mask,
                 )
                 runner_state = RunnerState(train_states, env_state, obsv, done_batch, (ac_hstate, cr_hstate), rng)
                 return runner_state, transition
@@ -143,9 +150,9 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 runner_state.last_obs,
                 runner_state.last_done,
                 runner_state.hstates, 
-                runner_state.rng
+                runner_state.rng, 
             )
-            
+
             last_world_state = last_obs["world_state"].swapaxes(0,1)
             last_world_state = last_world_state.reshape((config._num_actors,-1))
             
@@ -158,6 +165,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
 
             def _calculate_gae(traj_batch, last_val):
                 def _get_advantages(gae_and_next_value, transition):
+                                
                     gae, next_value = gae_and_next_value
                     done, value, reward = (
                         transition.global_done,
@@ -205,7 +213,10 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         ratio = jnp.exp(logratio)
                         gae = (gae - gae.mean()) / (gae.std() + 1e-8)
                         
-                        # TODO: FILTER OUT INVALID AGENTS
+                        
+                        jax.debug.breakpoint()
+      
+                        # TODO(dc): FILTER OUT INVALID AGENTS
                         loss_actor1 = ratio * gae
                         loss_actor2 = (
                             jnp.clip(
@@ -215,8 +226,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                             )
                             * gae
                         )
-                        
-                        jax.debug.breakpoint()
                         
                         loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
                         
@@ -304,10 +313,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                     lambda x: jnp.take(x, permutation, axis=1), batch
                 )
                 
-                jax.debug.breakpoint()
-                
-                # TODO: Filter out entries from invalid agents
-                
                 minibatches = jax.tree_util.tree_map(
                     lambda x: jnp.swapaxes(
                         jnp.reshape(
@@ -325,9 +330,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 train_states, loss_info = jax.lax.scan(
                     _update_minibatch, train_states, minibatches
                 )
-                
-                jax.debug.breakpoint()
-                
+                      
                 update_state = (
                     train_states,
                     jax.tree.map(lambda x: x.squeeze(), init_hstates),

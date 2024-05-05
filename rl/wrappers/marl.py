@@ -194,9 +194,9 @@ class WaymaxWrapper(JaxMARLWrapper):
             agent: jnp.ones((2,)) for i, agent in enumerate(self.agents)
         }
         
-    # def get_control_mask(self, state: SimulatorState):
-    #     control_mask = get_control_mask(state.object_metadata, _config.ObjectType.VALID)
-    #     return control_mask
+    def _get_control_mask(self, state: SimulatorState):
+        control_mask = get_control_mask(state.object_metadata, _config.ObjectType.VALID)
+        return control_mask
     
     @partial(jax.jit, static_argnums=0)
     def reset(self,

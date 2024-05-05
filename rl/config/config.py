@@ -52,7 +52,7 @@ class Config:
     PROJECT: str = 'waymax'
 
     # DO NOT CHANGE THIS. It is dark magic?
-    MAX_NUM_OBJECTS: int = 10
+    MAX_NUM_OBJECTS: int = 50
 
     # DO NOT CHANGE THESE. They will be set automatically in the code.
     _num_actors: int = -1
