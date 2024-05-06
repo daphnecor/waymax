@@ -6,7 +6,7 @@ from functools import partial
 import os
 import shutil
 from typing import Sequence, NamedTuple, Any, Tuple, Union, Dict
-
+import wandb
 import chex
 import jax
 import jax.numpy as jnp
@@ -41,7 +41,7 @@ class Transition(NamedTuple):
 
 
 def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
-               actor_network, env, scenario, latest_update_step, wandb_run_id):
+               actor_network, env, scenario, data_iter, latest_update_step, wandb_run_id):
     _render_callback = partial(render_callback, save_dir=config._vid_dir)
 
     def train(rng, runner_state=None):
@@ -51,15 +51,18 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
 
         # INIT NETWORK
         critic_network = CriticRNN(config=config)
-
-        jit_sim_render_episode = make_sim_render_episode(config, actor_network, env, scenario)
+        
+        jit_sim_render_episode = make_sim_render_episode(config, actor_network, env)
         num_render_actors = 1 * env.num_agents
         ac_init_hstate_render = ScannedRNN.initialize_carry(num_render_actors, config.HIDDEN_DIM)
-        render_states = jit_sim_render_episode(runner_state.train_states[0].params, ac_init_hstate_render)
+        render_states = jit_sim_render_episode(runner_state.train_states[0].params, ac_init_hstate_render, scenario)
         jax.experimental.io_callback(_render_callback, None, states=render_states, t=0)
 
         # TRAIN LOOP
         def _update_step_with_render(update_runner_state, unused, render_states):
+            
+            scenario = next(data_iter)
+            
             # COLLECT TRAJECTORIES
             runner_state, update_steps = update_runner_state
             
@@ -212,10 +215,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         logratio = log_prob - traj_batch.log_prob
                         ratio = jnp.exp(logratio)
                         gae = (gae - gae.mean()) / (gae.std() + 1e-8)
-                        
-                        
-                        jax.debug.breakpoint()
-      
+              
                         # TODO(dc): FILTER OUT INVALID AGENTS
                         loss_actor1 = ratio * gae
                         loss_actor2 = (
@@ -233,7 +233,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         loss_actor = loss_actor.mean()
                         entropy = pi.entropy().mean()
                         
-                        jax.debug.breakpoint()
+                        #jax.debug.breakpoint()
                         
                         # debug
                         approx_kl = ((ratio - 1) - logratio).mean()
@@ -357,6 +357,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             
             train_states = update_state[0]
             metric = traj_batch.info
+          
             metric = jax.tree.map(
                 lambda x: x.reshape(
                     (config["NUM_STEPS"], config["NUM_ENVS"], env.num_agents)
@@ -364,13 +365,16 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 traj_batch.info,
             )
             metric["loss"] = loss_info
+     
+            metric["obs_dist_min"] = traj_batch.obs.max()
+            metric["obs_dist_max"] = traj_batch.obs.min()
+            metric["obs_dist_std"] = traj_batch.obs.std()
+            metric["act_dist_mean"] = traj_batch.action.mean()
+            metric["act_dist_std"] = traj_batch.action.std()
+            
             rng = update_state[-1]
-
+            
             def callback(metric):
-                
-                # Create a video
-                # frames = env.render(scenario, waymax_base_env, dynamics_model)
-                # Video must be atleast 4 dimensions: time, channels, height, width
 
                 wandb.log(
                     {
@@ -386,7 +390,11 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         * config["NUM_ENVS"]
                         * config["NUM_STEPS"],
                         **metric["loss"],
-                        # "video": wandb.Video(frames, fps=10, format="gif"),
+                        "obs_dist_min": metric["obs_dist_min"],
+                        "obs_dist_max": metric["obs_dist_max"],
+                        "obs_dist_std": metric["obs_dist_std"],
+                        "act_dist_mean": metric["act_dist_mean"],
+                        "act_dist_std": metric["act_dist_std"],
                     }
                 )
 
@@ -402,9 +410,10 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             update_steps = update_steps + 1
             runner_state = RunnerState(train_states, env_state, last_obs, last_done, hstates, rng)
             do_render = update_steps % config.RENDER_FREQ == 0
+            
             render_states = jax.lax.cond(
                 do_render,
-                partial(jit_sim_render_episode, runner_state.train_states[0].params, ac_init_hstate_render),
+                partial(jit_sim_render_episode, runner_state.train_states[0].params, ac_init_hstate_render, scenario),
                 lambda: render_states,
             )
             jax.lax.cond(
@@ -426,7 +435,10 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             # _update_step, 
             (runner_state, latest_update_step), None, config._num_updates - latest_update_step
         )
-        return {"runner_state": runner_state}
+        
+        jax.debug.breakpoint()
+        
+        return {"runner_state": runner_state} 
 
     return train
 
@@ -446,7 +458,7 @@ def main(config: Config):
     rng = jax.random.PRNGKey(config.SEED)
     latest_update_step = checkpoint_manager.latest_step()
     
-    runner_state, actor_network, env, scenario, latest_update_step = \
+    runner_state, actor_network, env, scenario, latest_update_step, data_iter = \
         init_run(config, checkpoint_manager, latest_update_step, rng)
 
     if latest_update_step is not None:
@@ -474,8 +486,11 @@ def main(config: Config):
     with open(os.path.join(config._exp_dir, "wandb_run_id.txt"), "w") as f:
         f.write(wandb_run_id)
     with jax.disable_jit(False):
+        
+        scenario = next(data_iter)
+        
         train_jit = jax.jit(make_train(config, checkpoint_manager, env=env, actor_network=actor_network,
-                                       scenario=scenario,
+                                       scenario=scenario, data_iter=data_iter,
                                        latest_update_step=latest_update_step, wandb_run_id=run.id)) 
         out = train_jit(rng, runner_state=runner_state)
 

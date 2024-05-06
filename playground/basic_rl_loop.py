@@ -5,6 +5,7 @@ import mediapy
 from tqdm import tqdm
 import dataclasses
 import wandb
+from time import perf_counter
 
 from waymax import config as _config
 from waymax import dataloader
@@ -29,11 +30,18 @@ def render_frames(states):
 if __name__ == "__main__":
 
     # Config dataset:
-    max_num_objects = 5
+    max_num_objects = 128
 
     config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=max_num_objects)
+    
+    dataset_config = dataclasses.replace(
+        _config.DatasetConfig,
+        batch_dims=(2,),
+    )
     data_iter = dataloader.simulator_state_generator(config=config)
-    scenario = next(data_iter)
+    scenarios = next(data_iter)
+    
+    jax.debug.breakpoint()
 
     # Config the multi-agent environment:
     init_steps = 11

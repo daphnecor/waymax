@@ -123,10 +123,10 @@ class WaymaxWrapper(JaxMARLWrapper):
             self.world_state_fn = self.ws_with_agent_id
 
         self.observation_spaces = {
-            i: Box(low=-1, high=1.0, shape=(self._world_state_size,)) for i in self.agents
+            i: Box(low=-1.0, high=1.0, shape=(self._world_state_size,)) for i in self.agents
         }
         self.action_spaces = {
-            i: Box(low=-1, high=1.0, shape=(2,)) for i in self.agents 
+            i: Box(low=-2, high=2.0, shape=(2,)) for i in self.agents 
         }
 
     def observation_space(self, agent: str):
