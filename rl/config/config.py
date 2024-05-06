@@ -10,16 +10,16 @@ from dataclasses import dataclass
 
 @dataclass
 class Config:
-    LR: float = 0.001
-    BATCH_SIZE: int = 256
+    LR: float = 3e-4
+    BATCH_SIZE: int = 521
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
-    NUM_ENVS: int = 2
+    NUM_ENVS: int = 10
     NUM_STEPS: int = 521 
     TOTAL_TIMESTEPS: float = 1e7
     HIDDEN_DIM: int = 1024
     UPDATE_EPOCHS: int = 4
-    NUM_MINIBATCHES: int = 1
+    NUM_MINIBATCHES: int = 4
     GAMMA: float = 0.99
     GAE_LAMBDA: float = 0.95
     CLIP_EPS: float = 0.2
@@ -32,7 +32,7 @@ class Config:
     # MAP_NAME: str = '2s3z'
     SEED: int = 1
     ANNEAL_LR: bool = False
-    OVERWRITE: bool = False
+    OVERWRITE: bool = True
     CKPT_FREQ: int = 50
     RENDER_FREQ: int = 20
     EXP_NAME: Optional[str] = None
@@ -43,7 +43,7 @@ class Config:
 
     OFFROAD: float = -1.0
     OVERLAP: float = -1.0
-    LOG_DIVERGENCE: float = 0.0
+    LOG_DIVERGENCE: float = -1.0
 
     # WandB Params
     WANDB_MODE: str = 'run'  # one of: 'offline', 'run', 'dryrun', 'shared', 'disabled', 'online'

@@ -436,8 +436,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             (runner_state, latest_update_step), None, config._num_updates - latest_update_step
         )
         
-        jax.debug.breakpoint()
-        
         return {"runner_state": runner_state} 
 
     return train

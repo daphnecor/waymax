@@ -23,7 +23,7 @@ from waymax import datatypes
 from waymax import env as _env
 from waymax import agents
 from waymax import visualization
-
+from waymax import datatypes
 from waymax import config as _config
 from waymax.datatypes.action import Action
 from waymax.datatypes import observation
@@ -65,9 +65,12 @@ class WaymaxLogWrapper(JaxMARLWrapper):
         action: Union[int, float],
         scenario,
     ) -> Tuple[chex.Array, LogEnvState, float, bool, dict]:
+        
+        # Take a step in the environment
         obs, env_state, reward, done, info = self._env.step(
             key, state.env_state, action, scenario
         )
+      
         ep_done = done["__all__"]
         new_episode_return = state.episode_returns + self._batchify_floats(reward)
         new_episode_length = state.episode_lengths + 1
@@ -87,6 +90,7 @@ class WaymaxLogWrapper(JaxMARLWrapper):
         info["returned_episode_returns"] = state.returned_episode_returns
         info["returned_episode_lengths"] = state.returned_episode_lengths
         info["returned_episode"] = jnp.full((self._env.num_agents,), ep_done)
+          
         return obs, state, reward, done, info
 
 
@@ -280,51 +284,3 @@ class WaymaxWrapper(JaxMARLWrapper):
         
     def world_state_size(self):
         return self._world_state_size 
-    
-    def render(self, scenario, env, key: jax.random.PRNGKey, actor=None, init_steps=11):
-        """Make a video of the policy acting in the environment."""
-        
-        if actor is None:
-            # IDM actor/policy controlling both object 0 and 1.
-            # TODO: use our policy 
-            actor = agents.IDMRoutePolicy(
-                # Controlled objects are those valid at t=0.
-                is_controlled_func=lambda state: state.log_trajectory.valid[..., init_steps]
-            )
-        
-        actors = [actor]
-
-        jit_step = jax.jit(env.step)
-        jit_select_action_list = [jax.jit(actor.select_action) for actor in actors]
-
-        init_obs, init_state = env.reset(scenario, key)
-        frames = []
-        rng = jax.random.PRNGKey(0)
-
-        def step_env(carry, _):
-            rng, obs, state = carry
-
-            traj = datatypes.dynamic_index(
-                state.sim_trajectory, state.timestep, axis=-1, keepdims=True
-            )
-            hidden, pi = actor.network.apply(actor.params, hidden, obs)            
-
-            # outputs = [
-            #     jit_select_action({}, state, obs, None, rng)
-            #     for jit_select_action in jit_select_action_list
-            # ]
-            action = agents.merge_actions(outputs)
-            next_state = jit_step(state, action)
-            rng, _ = jax.random.split(rng)
-
-            return (rng, next_state), next_state
-            
-        frames = [visualization.plot_simulator_state(init_state.env_state, use_log_traj=False)]
-        remaining_timesteps = init_state.env_state.remaining_timesteps
-        states = jax.lax.scan(step_env, (rng, init_obs, init_state), None, length=remaining_timesteps, reverse=False, unroll=5)
-        for i in range(remaining_timesteps):
-            if i % 5 == 0:
-                state = jax.tree.map_structure(lambda x: x[i], states)
-                frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False))
-
-        return np.array(frames)
