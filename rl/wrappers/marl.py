@@ -23,10 +23,13 @@ from waymax import datatypes
 from waymax import env as _env
 from waymax import agents
 from waymax import visualization
+from waymax import datatypes
+from waymax import config as _config
 from waymax.datatypes.action import Action
+from waymax.datatypes import observation
 from waymax.datatypes import roadgraph
 from waymax.datatypes.simulator_state import SimulatorState
-
+from waymax.datatypes import get_control_mask
 
 @struct.dataclass
 class WaymaxLogEnvState:
@@ -62,9 +65,12 @@ class WaymaxLogWrapper(JaxMARLWrapper):
         action: Union[int, float],
         scenario,
     ) -> Tuple[chex.Array, LogEnvState, float, bool, dict]:
+        
+        # Take a step in the environment
         obs, env_state, reward, done, info = self._env.step(
             key, state.env_state, action, scenario
         )
+      
         ep_done = done["__all__"]
         new_episode_return = state.episode_returns + self._batchify_floats(reward)
         new_episode_length = state.episode_lengths + 1
@@ -84,6 +90,7 @@ class WaymaxLogWrapper(JaxMARLWrapper):
         info["returned_episode_returns"] = state.returned_episode_returns
         info["returned_episode_lengths"] = state.returned_episode_lengths
         info["returned_episode"] = jnp.full((self._env.num_agents,), ep_done)
+          
         return obs, state, reward, done, info
 
 
@@ -99,8 +106,7 @@ class WaymaxWrapper(JaxMARLWrapper):
     
     def __init__(self,
                  env: _env.MultiAgentEnvironment,
-                 obs_with_agent_id=True,
-                 ):
+                 obs_with_agent_id=False):
         super().__init__(env)
         self.num_agents = self._env.config.max_num_objects
         self.obs_with_agent_id = obs_with_agent_id
@@ -108,27 +114,23 @@ class WaymaxWrapper(JaxMARLWrapper):
             f'object_{i}' for i in range(self.num_agents)
         ]
         
-        self._agent_state_size = 6
-
-        if OBSERVE_ROADGRAPH:
-            self._roadgraph_size = 20_000 * 2  # 40_000
-        else:
-            self._roadgraph_size = 0
+        # Size of each agent's observation (including other agents and rg points)
+        self._agent_obs_size = self.num_agents * 7 + env.config.observation.roadgraph_top_k * 7
 
         self.world_state_fn = self.ws_just_env_state
 
         if not self.obs_with_agent_id:
-            self._world_state_size = self._agent_state_size * self.num_agents + self._roadgraph_size
+            self._world_state_size = self._agent_obs_size
             self.world_state_fn = self.ws_just_env_state
         else:
-            self._world_state_size = self._agent_state_size * self.num_agents + self._roadgraph_size + self.num_agents
+            self._world_state_size = self._agent_obs_size + self.num_agents
             self.world_state_fn = self.ws_with_agent_id
 
         self.observation_spaces = {
-            i: Box(low=-1, high=1.0, shape=(self._agent_state_size * self.num_agents + self._roadgraph_size + self.num_agents,)) for i in self.agents
+            i: Box(low=-1.0, high=1.0, shape=(self._world_state_size,)) for i in self.agents
         }
         self.action_spaces = {
-            i: Box(low=-1, high=1.0, shape=(2,)) for i in self.agents 
+            i: Box(low=-2, high=2.0, shape=(2,)) for i in self.agents 
         }
 
     def observation_space(self, agent: str):
@@ -141,52 +143,48 @@ class WaymaxWrapper(JaxMARLWrapper):
 
     @partial(jax.jit, static_argnums=0)
     def get_obs(env, env_state):
-
-        traj = datatypes.dynamic_index(
+        
+        # Get global sim trajectory
+        global_traj = datatypes.dynamic_index(
             env_state.sim_trajectory, env_state.timestep, axis=-1, keepdims=True
         )
-        valid = traj.valid
-
-        if OBSERVE_ROADGRAPH:
-            # The absolute road points
-            roadgraph_points = env_state.roadgraph_points
-            roadgraph_points_xy = roadgraph_points.xy
-            # for i in range(env.config.max_num_objects):
-
-            # rg_obs = {roadgraph.filter_topk_roadgraph_points(
-            #     roadgraph_points, env_state.sim_trajectory.xy[i, 10], topk=10
-            # ) for i in range(env.config.max_num_objects
-            # )}
-            # for agent in env.agents:
-            #     global_rg = roadgraph.filter_topk_roadgraph_points(
-            #         env_state.roadgraph_points,
-            #         env_state.sim_trajectory.xy[i, 10],
-            #         topk=10,
-            #     )
         
-        else:
-            roadgraph_points_xy = jnp.zeros((0, 2))
+        obs = {}
+        # agent_ids = jnp.eye(env.num_agents)
+
+        for idx in range(env.config.max_num_objects):
+
+            # Get global roadgraph points
+            global_rg = roadgraph.filter_topk_roadgraph_points(
+                env_state.roadgraph_points,
+                env_state.sim_trajectory.xy[idx, env_state.timestep],
+                topk=env.config.observation.roadgraph_top_k,
+            )
             
+            pose = observation.ObjectPose2D.from_center_and_yaw(
+                xy=env_state.sim_trajectory.xy[idx, env_state.timestep],
+                yaw=env_state.sim_trajectory.yaw[idx, env_state.timestep],
+                valid=env_state.sim_trajectory.valid[idx, env_state.timestep],
+            )
+            
+            sim_traj = observation.transform_trajectory(global_traj, pose)
+            exp_rg = observation.transform_roadgraph_points(global_rg, pose)
+            
+            agent_obs = jnp.concatenate((
+                sim_traj.xyz.reshape(-1), sim_traj.yaw.reshape(-1),
+                sim_traj.vel_xy.reshape(-1), sim_traj.vel_yaw.reshape(-1),
+                exp_rg.xyz.reshape(-1), exp_rg.dir_xyz.reshape(-1),
+                exp_rg.types.reshape(-1), # agent_ids[idx],
+            ))
         
-        # Shape is (2000, 2)
-        valid_roadgraph_points_xy = roadgraph_points_xy
+            obs[f'object_{idx}'] = agent_obs
 
-        world_state = jnp.concatenate(
-        (traj.xy.reshape(-1), traj.yaw.reshape(-1), traj.vel_x.reshape(-1), traj.vel_y.reshape(-1),
-         traj.vel_yaw.reshape(-1), valid_roadgraph_points_xy.reshape(-1)), axis=0
-        )
-        agent_ids = jnp.eye(env.num_agents)
-        # world_state_w_ids = jnp.concatenate((world_state, agent_ids), axis=-1)
-        # world_state_w_ids = world_state_w_ids[valid]
-        obs = {
-            agent: jnp.concatenate((world_state, agent_ids[i]), axis=0)
-            for i, agent in enumerate(env.agents)
-        }
         obs.update(
             {
-                "world_state": world_state.repeat(env.num_agents, axis=0),
+                "world_state": jnp.stack([obs[agent] for agent in env.agents])
             }
         )
+                       
         return obs
         
 
@@ -199,7 +197,10 @@ class WaymaxWrapper(JaxMARLWrapper):
             # agent: jnp.ones((2,)) for i, agent in enumerate(self.agents) if valid[i]
             agent: jnp.ones((2,)) for i, agent in enumerate(self.agents)
         }
-
+        
+    def _get_control_mask(self, state: SimulatorState):
+        control_mask = get_control_mask(state.object_metadata, _config.ObjectType.VALID)
+        return control_mask
     
     @partial(jax.jit, static_argnums=0)
     def reset(self,
@@ -283,51 +284,3 @@ class WaymaxWrapper(JaxMARLWrapper):
         
     def world_state_size(self):
         return self._world_state_size 
-    
-    def render(self, scenario, env, key: jax.random.PRNGKey, actor=None, init_steps=11):
-        """Make a video of the policy acting in the environment."""
-        
-        if actor is None:
-            # IDM actor/policy controlling both object 0 and 1.
-            # TODO: use our policy 
-            actor = agents.IDMRoutePolicy(
-                # Controlled objects are those valid at t=0.
-                is_controlled_func=lambda state: state.log_trajectory.valid[..., init_steps]
-            )
-        
-        actors = [actor]
-
-        jit_step = jax.jit(env.step)
-        jit_select_action_list = [jax.jit(actor.select_action) for actor in actors]
-
-        init_obs, init_state = env.reset(scenario, key)
-        frames = []
-        rng = jax.random.PRNGKey(0)
-
-        def step_env(carry, _):
-            rng, obs, state = carry
-
-            traj = datatypes.dynamic_index(
-                state.sim_trajectory, state.timestep, axis=-1, keepdims=True
-            )
-            hidden, pi = actor.network.apply(actor.params, hidden, obs)            
-
-            # outputs = [
-            #     jit_select_action({}, state, obs, None, rng)
-            #     for jit_select_action in jit_select_action_list
-            # ]
-            action = agents.merge_actions(outputs)
-            next_state = jit_step(state, action)
-            rng, _ = jax.random.split(rng)
-
-            return (rng, next_state), next_state
-            
-        frames = [visualization.plot_simulator_state(init_state.env_state, use_log_traj=False)]
-        remaining_timesteps = init_state.env_state.remaining_timesteps
-        states = jax.lax.scan(step_env, (rng, init_obs, init_state), None, length=remaining_timesteps, reverse=False, unroll=5)
-        for i in range(remaining_timesteps):
-            if i % 5 == 0:
-                state = jax.tree.map_structure(lambda x: x[i], states)
-                frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False))
-
-        return np.array(frames)

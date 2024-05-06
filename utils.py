@@ -11,8 +11,6 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
-from flax.linen.initializers import constant, orthogonal
-# from flax.training import orbax_utils
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -71,7 +69,7 @@ def linear_schedule(config, count):
 
     
 # Reload single scenario from disk for speedier debugging
-DEBUG_WITH_ONE_SCENARIO = True
+DEBUG_WITH_ONE_SCENARIO = False
 
 
 def init_run(config: Config, ckpt_manager, latest_update_step, rng):
@@ -104,11 +102,20 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     dynamics_model = dynamics.InvertibleBicycleModel(
         normalize_actions=True,  # This means we feed in all actions as in [-1, 1]
     )
+    
+    # Use relative coordinates
+    obs_config = dataclasses.replace(
+        _config.ObservationConfig(), 
+        coordinate_frame=_config.CoordinateFrame.OBJECT 
+        if config.COORDINATE_FRAME == "OBJECT" else _config.CoordinateFrame.GLOBAL,
+        roadgraph_top_k=config.TOPK_ROADPOINTS,
+    )
 
     # Create env config
     env_config = dataclasses.replace(
         _config.EnvironmentConfig(),
         max_num_objects=config.MAX_NUM_OBJECTS,
+        observation=obs_config,
         rewards=_config.LinearCombinationRewardConfig(
             {
                 'offroad': config.OFFROAD,
@@ -116,7 +123,6 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
                 'log_divergence': config.LOG_DIVERGENCE,
             }
         ),
-        #metrics={}
         # Controll all valid objects in the scene.
         controlled_object=_config.ObjectType.VALID,
     )
@@ -134,6 +140,7 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
 
     # Configure training
     config._num_actors = env.num_agents * config.NUM_ENVS
+    
     config._num_updates = int(
         config["TOTAL_TIMESTEPS"] // config.NUM_STEPS // config["NUM_ENVS"]
     )
@@ -164,7 +171,6 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
         jnp.zeros((1, config["NUM_ENVS"])),
         jnp.zeros((1, config["NUM_ENVS"], env.action_space(env.agents[0]).shape[0])),
     )
-    # ac_init_hstate = ScannedRNN.initialize_carry(config.NUM_ENVS, config["HIDDEN_DIM"])
     ac_init_hstate = ScannedRNN.initialize_carry(config.NUM_ENVS, config.HIDDEN_DIM)
     actor_network_params = actor_network.init(_rng_actor, ac_init_hstate, ac_init_x)
 
@@ -225,7 +231,7 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
         _rng,
     )
 
-    return runner_state, actor_network, env, scenario, latest_update_step
+    return runner_state, actor_network, env, scenario, latest_update_step, data_iter
 
 
 def restore_run(config: Config, runner_state: RunnerState, ckpt_manager, latest_update_step: int):
@@ -239,18 +245,21 @@ def restore_run(config: Config, runner_state: RunnerState, ckpt_manager, latest_
     return runner_state, wandb_run_id
 
 
-def make_sim_render_episode(config: Config, actor_network, env, scenario):
+def make_sim_render_episode(config: Config, actor_network, env):
+    
     # FIXME: Shouldn't hardcode this
     max_episode_len = 91
-
-    rng = jax.random.PRNGKey(0)
-    init_obs, init_state = env.reset(scenario, rng)
-    init_obs = batchify(init_obs, env.agents, env.num_agents)
+    
     # remaining_timesteps = init_state.env_state.remaining_timesteps
     # actor_params = runner_state.train_states[0].params
     # actor_hidden = runner_state.hstates[0]
 
-    def sim_render_episode(actor_params, actor_hidden):
+    def sim_render_episode(actor_params, actor_hidden, scenario):
+        rng = jax.random.PRNGKey(0)
+        
+        init_obs, init_state = env.reset(scenario, rng)
+        init_obs = batchify(init_obs, env.agents, env.num_agents) 
+        
         def step_env(carry, _):
             rng, obs, state, done, actor_hidden = carry
             # print(obs.shape)
@@ -320,8 +329,8 @@ def render_callback(states: WaymaxLogEnvState, save_dir: str, t: int):
                 frames.append(visualization.plot_simulator_state(state.env_state, use_log_traj=False,
                                                                  render_overlaps=False))
 
-    imageio.mimsave(os.path.join(save_dir, f"enjoy_{t}.gif"), frames, fps=10, loop=0)
-    wandb.log({"video": wandb.Video(os.path.join(save_dir, f"enjoy_{t}.gif"), fps=10, format="gif")})
+    imageio.mimsave(os.path.join(save_dir, f"enjoy_{t}.gif"), frames, fps=5, loop=0)
+    wandb.log({"video": wandb.Video(os.path.join(save_dir, f"enjoy_{t}.gif"), fps=5, format="gif")})
 
 
 def get_exp_dir(config: Config):

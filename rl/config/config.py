@@ -8,18 +8,16 @@ from dataclasses import dataclass
 #     problem: str = "binary"
 #     representation: str = "nca"
 
-
 @dataclass
 class Config:
-    LR: float = 0.001
-    BATCH_SIZE: int = 32
+    LR: float = 3e-4
+    BATCH_SIZE: int = 521
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
-    NUM_ENVS: int = 128
-    NUM_STEPS: int = 128 
+    NUM_ENVS: int = 10
+    NUM_STEPS: int = 521 
     TOTAL_TIMESTEPS: float = 1e7
-    HIDDEN_DIM: int = 128
-    HIDDEN_DIM: int = 128
+    HIDDEN_DIM: int = 1024
     UPDATE_EPOCHS: int = 4
     NUM_MINIBATCHES: int = 4
     GAMMA: float = 0.99
@@ -32,26 +30,28 @@ class Config:
     ACTIVATION: str = 'relu'
     OBS_WITH_AGENT_ID: bool = True
     # MAP_NAME: str = '2s3z'
-    SEED: int = 0
+    SEED: int = 1
     ANNEAL_LR: bool = False
-    OVERWRITE: bool = False
+    OVERWRITE: bool = True
     CKPT_FREQ: int = 50
-    RENDER_FREQ: int = 50
+    RENDER_FREQ: int = 20
     EXP_NAME: Optional[str] = None
+    
+    # Observations
+    COORDINATE_FRAME: str = 'OBJECT' # Relative coordinate frame
+    TOPK_ROADPOINTS: int = 500
 
-    # ENV_KWARGS: dict = {}  # Use a subconfig for this if we really need it
     OFFROAD: float = -1.0
-    OVERLAP: float = 0.0
-    LOG_DIVERGENCE: float = 0.0
+    OVERLAP: float = -1.0
+    LOG_DIVERGENCE: float = -1.0
 
     # WandB Params
     WANDB_MODE: str = 'run'  # one of: 'offline', 'run', 'dryrun', 'shared', 'disabled', 'online'
-    ENTITY: str = ""
-    PROJECT: str = 'waymax_saphne'
+    ENTITY: str = ''
+    PROJECT: str = 'waymax'
 
     # DO NOT CHANGE THIS. It is dark magic?
-    MAX_NUM_OBJECTS: int = 8
-
+    MAX_NUM_OBJECTS: int = 10
 
     # DO NOT CHANGE THESE. They will be set automatically in the code.
     _num_actors: int = -1

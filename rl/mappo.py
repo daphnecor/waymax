@@ -6,7 +6,7 @@ from functools import partial
 import os
 import shutil
 from typing import Sequence, NamedTuple, Any, Tuple, Union, Dict
-
+import wandb
 import chex
 import jax
 import jax.numpy as jnp
@@ -26,7 +26,6 @@ from rl.config.config import Config
 from rl.model import ActorRNN, CriticRNN, ScannedRNN
 from utils import RunnerState, batchify, init_config, init_run, make_sim_render_episode, render_callback, restore_run, save_checkpoint, unbatchify
 
-
 class Transition(NamedTuple):
     global_done: jnp.ndarray
     done: jnp.ndarray
@@ -38,10 +37,11 @@ class Transition(NamedTuple):
     world_state: jnp.ndarray
     info: jnp.ndarray
     avail_actions: jnp.ndarray
+    control_mask: jnp.ndarray 
 
 
 def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
-               actor_network, env, scenario, latest_update_step, wandb_run_id):
+               actor_network, env, scenario, data_iter, latest_update_step, wandb_run_id):
     _render_callback = partial(render_callback, save_dir=config._vid_dir)
 
     def train(rng, runner_state=None):
@@ -51,25 +51,31 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
 
         # INIT NETWORK
         critic_network = CriticRNN(config=config)
-
-        jit_sim_render_episode = make_sim_render_episode(config, actor_network, env, scenario)
+        
+        jit_sim_render_episode = make_sim_render_episode(config, actor_network, env)
         num_render_actors = 1 * env.num_agents
         ac_init_hstate_render = ScannedRNN.initialize_carry(num_render_actors, config.HIDDEN_DIM)
-        render_states = jit_sim_render_episode(runner_state.train_states[0].params, ac_init_hstate_render)
+        render_states = jit_sim_render_episode(runner_state.train_states[0].params, ac_init_hstate_render, scenario)
         jax.experimental.io_callback(_render_callback, None, states=render_states, t=0)
 
         # TRAIN LOOP
-        # def _update_step(update_runner_state, unused):
         def _update_step_with_render(update_runner_state, unused, render_states):
+            
+            scenario = next(data_iter)
+            
             # COLLECT TRAJECTORIES
             runner_state, update_steps = update_runner_state
             
             def _env_step(runner_state: RunnerState, unused):
-                train_states, env_state, last_obs, last_done, hstates, rng = (runner_state.train_states,
-                                                                              runner_state.env_state,
-                                                                              runner_state.last_obs,
-                                                                              runner_state.last_done,
-                                                                              runner_state.hstates, runner_state.rng)
+                
+                train_states, env_state, last_obs, last_done, hstates, rng = (
+                    runner_state.train_states,
+                    runner_state.env_state,
+                    runner_state.last_obs,
+                    runner_state.last_done,
+                    runner_state.hstates, 
+                    runner_state.rng
+                )
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -77,13 +83,17 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 avail_actions = jax.lax.stop_gradient(
                     batchify(avail_actions, env.agents, config._num_actors)
                 )
+                control_mask = jax.vmap(env._get_control_mask)(env_state.env_state)
+                
+                # TODO(@dc) BATCHIFY?
+
                 obs_batch = batchify(last_obs, env.agents, config._num_actors)
                 ac_in = (
                     obs_batch[np.newaxis, :],
                     last_done[np.newaxis, :],
                     avail_actions,
                 )
-                #print('env step ac in', ac_in)
+    
                 ac_hstate, pi = actor_network.apply(train_states[0].params, hstates[0], ac_in)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
@@ -95,9 +105,10 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 # VALUE
                 # output of wrapper is (num_envs, num_agents, world_state_size)
                 # swap axes to (num_agents, num_envs, world_state_size) before reshaping to (num_actors, world_state_size)
-                world_state = last_obs["world_state"].swapaxes(0,1)  
-                world_state = world_state.reshape((config._num_actors,-1))
-                
+                world_state = last_obs["world_state"].swapaxes(0, 1)  
+                # shape: (num_envs * num_max_objects, world_state_size)
+                world_state = world_state.reshape((config._num_actors, -1))
+            
                 cr_in = (
                     world_state[None, :],
                     last_done[np.newaxis, :],
@@ -123,22 +134,28 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                     world_state,
                     info,
                     avail_actions,
+                    control_mask,
                 )
                 runner_state = RunnerState(train_states, env_state, obsv, done_batch, (ac_hstate, cr_hstate), rng)
                 return runner_state, transition
 
             initial_hstates = runner_state.hstates
+            
+            # DO ROLLOUTS
             runner_state, traj_batch = jax.lax.scan(
                 _env_step, runner_state, None, config["NUM_STEPS"]
             )
-            
+      
             # CALCULATE ADVANTAGE
-            train_states, env_state, last_obs, last_done, hstates, rng = (runner_state.train_states,
-                                                                            runner_state.env_state,
-                                                                            runner_state.last_obs,
-                                                                            runner_state.last_done,
-                                                                            runner_state.hstates, runner_state.rng)
-            
+            train_states, env_state, last_obs, last_done, hstates, rng = (
+                runner_state.train_states,
+                runner_state.env_state,
+                runner_state.last_obs,
+                runner_state.last_done,
+                runner_state.hstates, 
+                runner_state.rng, 
+            )
+
             last_world_state = last_obs["world_state"].swapaxes(0,1)
             last_world_state = last_world_state.reshape((config._num_actors,-1))
             
@@ -151,6 +168,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
 
             def _calculate_gae(traj_batch, last_val):
                 def _get_advantages(gae_and_next_value, transition):
+                                
                     gae, next_value = gae_and_next_value
                     done, value, reward = (
                         transition.global_done,
@@ -172,28 +190,33 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                     unroll=16,
                 )
                 return advantages, advantages + traj_batch.value
-
+            
             advantages, targets = _calculate_gae(traj_batch, last_val)
-
+            
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 def _update_minibatch(train_states, batch_info):
                     actor_train_state, critic_train_state = train_states
+                    
                     ac_init_hstate, cr_init_hstate, traj_batch, advantages, targets = batch_info
-
+                    
                     def _actor_loss_fn(actor_params, init_hstate, traj_batch, gae):
+                        
                         # RERUN NETWORK
                         _, pi = actor_network.apply(
                             actor_params,
                             init_hstate.squeeze(),
                             (traj_batch.obs, traj_batch.done, traj_batch.avail_actions),
                         )
+                        
                         log_prob = pi.log_prob(traj_batch.action)
 
                         # CALCULATE ACTOR LOSS
                         logratio = log_prob - traj_batch.log_prob
                         ratio = jnp.exp(logratio)
                         gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+              
+                        # TODO(dc): FILTER OUT INVALID AGENTS
                         loss_actor1 = ratio * gae
                         loss_actor2 = (
                             jnp.clip(
@@ -203,9 +226,14 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                             )
                             * gae
                         )
+                        
                         loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+                        
+                        # Average
                         loss_actor = loss_actor.mean()
                         entropy = pi.entropy().mean()
+                        
+                        #jax.debug.breakpoint()
                         
                         # debug
                         approx_kl = ((ratio - 1) - logratio).mean()
@@ -230,7 +258,8 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         )
                         critic_loss = config["VF_COEF"] * value_loss
                         return critic_loss, (value_loss)
-
+                    
+                    # COMPUTE ACTOR AND CRITIC GRADIENTS
                     actor_grad_fn = jax.value_and_grad(_actor_loss_fn, has_aux=True)
                     actor_loss, actor_grads = actor_grad_fn(
                         actor_train_state.params, ac_init_hstate, traj_batch, advantages
@@ -240,6 +269,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         critic_train_state.params, cr_init_hstate, traj_batch, targets
                     )
                     
+                    # INSERT GRADIENTS
                     actor_train_state = actor_train_state.apply_gradients(grads=actor_grads)
                     critic_train_state = critic_train_state.apply_gradients(grads=critic_grads)
                     
@@ -282,7 +312,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 shuffled_batch = jax.tree_util.tree_map(
                     lambda x: jnp.take(x, permutation, axis=1), batch
                 )
-
+                
                 minibatches = jax.tree_util.tree_map(
                     lambda x: jnp.swapaxes(
                         jnp.reshape(
@@ -300,6 +330,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 train_states, loss_info = jax.lax.scan(
                     _update_minibatch, train_states, minibatches
                 )
+                      
                 update_state = (
                     train_states,
                     jax.tree.map(lambda x: x.squeeze(), init_hstates),
@@ -309,7 +340,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                     rng,
                 )
                 return update_state, loss_info
-
+            
             update_state = (
                 train_states,
                 initial_hstates,
@@ -326,6 +357,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             
             train_states = update_state[0]
             metric = traj_batch.info
+          
             metric = jax.tree.map(
                 lambda x: x.reshape(
                     (config["NUM_STEPS"], config["NUM_ENVS"], env.num_agents)
@@ -333,13 +365,16 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 traj_batch.info,
             )
             metric["loss"] = loss_info
+     
+            metric["obs_dist_min"] = traj_batch.obs.max()
+            metric["obs_dist_max"] = traj_batch.obs.min()
+            metric["obs_dist_std"] = traj_batch.obs.std()
+            metric["act_dist_mean"] = traj_batch.action.mean()
+            metric["act_dist_std"] = traj_batch.action.std()
+            
             rng = update_state[-1]
-
+            
             def callback(metric):
-                
-                # Create a video
-                # frames = env.render(scenario, waymax_base_env, dynamics_model)
-                # Video must be atleast 4 dimensions: time, channels, height, width
 
                 wandb.log(
                     {
@@ -355,7 +390,11 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         * config["NUM_ENVS"]
                         * config["NUM_STEPS"],
                         **metric["loss"],
-                        # "video": wandb.Video(frames, fps=10, format="gif"),
+                        "obs_dist_min": metric["obs_dist_min"],
+                        "obs_dist_max": metric["obs_dist_max"],
+                        "obs_dist_std": metric["obs_dist_std"],
+                        "act_dist_mean": metric["act_dist_mean"],
+                        "act_dist_std": metric["act_dist_std"],
                     }
                 )
 
@@ -371,9 +410,10 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             update_steps = update_steps + 1
             runner_state = RunnerState(train_states, env_state, last_obs, last_done, hstates, rng)
             do_render = update_steps % config.RENDER_FREQ == 0
+            
             render_states = jax.lax.cond(
                 do_render,
-                partial(jit_sim_render_episode, runner_state.train_states[0].params, ac_init_hstate_render),
+                partial(jit_sim_render_episode, runner_state.train_states[0].params, ac_init_hstate_render, scenario),
                 lambda: render_states,
             )
             jax.lax.cond(
@@ -395,7 +435,8 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             # _update_step, 
             (runner_state, latest_update_step), None, config._num_updates - latest_update_step
         )
-        return {"runner_state": runner_state}
+        
+        return {"runner_state": runner_state} 
 
     return train
 
@@ -403,6 +444,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(config: Config):
     init_config(config)
+    
     if config.OVERWRITE:
         shutil.rmtree(config._exp_dir, ignore_errors=True)
 
@@ -413,7 +455,8 @@ def main(config: Config):
 
     rng = jax.random.PRNGKey(config.SEED)
     latest_update_step = checkpoint_manager.latest_step()
-    runner_state, actor_network, env, scenario, latest_update_step = \
+    
+    runner_state, actor_network, env, scenario, latest_update_step, data_iter = \
         init_run(config, checkpoint_manager, latest_update_step, rng)
 
     if latest_update_step is not None:
@@ -441,8 +484,11 @@ def main(config: Config):
     with open(os.path.join(config._exp_dir, "wandb_run_id.txt"), "w") as f:
         f.write(wandb_run_id)
     with jax.disable_jit(False):
+        
+        scenario = next(data_iter)
+        
         train_jit = jax.jit(make_train(config, checkpoint_manager, env=env, actor_network=actor_network,
-                                       scenario=scenario,
+                                       scenario=scenario, data_iter=data_iter,
                                        latest_update_step=latest_update_step, wandb_run_id=run.id)) 
         out = train_jit(rng, runner_state=runner_state)
 
