@@ -36,6 +36,8 @@ class Config:
     CKPT_FREQ: int = 50
     RENDER_FREQ: int = 20
     EXP_NAME: Optional[str] = None
+    # Reload single scenario from disk for speedier debugging
+    DEBUG_WITH_ONE_SCENARIO: bool = False
     
     # Observations
     COORDINATE_FRAME: str = 'OBJECT' # Relative coordinate frame

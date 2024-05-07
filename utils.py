@@ -67,23 +67,20 @@ def linear_schedule(config, count):
     )
     return config["LR"] * frac
 
-    
-# Reload single scenario from disk for speedier debugging
-DEBUG_WITH_ONE_SCENARIO = False
-
 
 def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     t_start_up_start = perf_counter()
     
     # HACK when debugging with one scenario to avoid long loading time for data iterator
     scenario_name = f"scenario_{config.MAX_NUM_OBJECTS}-max-objects.pkl"
-    if DEBUG_WITH_ONE_SCENARIO and os.path.isfile(scenario_name):
+    if config.DEBUG_WITH_ONE_SCENARIO and os.path.isfile(scenario_name):
         t_data_iter_start = perf_counter()
         t_next_start = perf_counter()
         with open(scenario_name, "rb") as f:
            scenario: SimulatorState = pickle.load(f) 
         t_data_iter_end = perf_counter()
         t_next_end = perf_counter() 
+        data_iter = None
 
     else:
         # Configure dataset
