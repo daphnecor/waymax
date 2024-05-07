@@ -63,6 +63,8 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
             
             scenario = next(data_iter)
             
+            jax.debug.print("@ _update_step_with_render: using scene {}", scenario.object_metadata.ids.sum())
+            
             # COLLECT TRAJECTORIES
             runner_state, update_steps = update_runner_state
             
@@ -85,8 +87,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                 )
                 control_mask = jax.vmap(env._get_control_mask)(env_state.env_state)
                 
-                # TODO(@dc) BATCHIFY?
-
                 obs_batch = batchify(last_obs, env.agents, config._num_actors)
                 ac_in = (
                     obs_batch[np.newaxis, :],
@@ -216,7 +216,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         ratio = jnp.exp(logratio)
                         gae = (gae - gae.mean()) / (gae.std() + 1e-8)
               
-                        # TODO(dc): FILTER OUT INVALID AGENTS
                         loss_actor1 = ratio * gae
                         loss_actor2 = (
                             jnp.clip(
@@ -232,8 +231,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         # Average
                         loss_actor = loss_actor.mean()
                         entropy = pi.entropy().mean()
-                        
-                        #jax.debug.breakpoint()
                         
                         # debug
                         approx_kl = ((ratio - 1) - logratio).mean()
@@ -325,8 +322,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                     ),
                     shuffled_batch,
                 )
-
-                #train_states = (actor_train_state, critic_train_state)
+                
                 train_states, loss_info = jax.lax.scan(
                     _update_minibatch, train_states, minibatches
                 )
@@ -383,9 +379,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
                         "returns": metric["returned_episode_returns"][:, :, 0][
                             metric["returned_episode"][:, :, 0]
                         ].mean(),
-                        # "win_rate": metric["returned_won_episode"][:, :, 0][
-                        #     metric["returned_episode"][:, :, 0]
-                        # ].mean(),
                         "env_step": metric["update_steps"]
                         * config["NUM_ENVS"]
                         * config["NUM_STEPS"],
@@ -431,7 +424,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
         _update_step = functools.partial(_update_step_with_render, render_states=render_states)
 
         runner_state, metric = jax.lax.scan(
-            _update_step, 
+            _update_step,   
             # _update_step, 
             (runner_state, latest_update_step), None, config._num_updates - latest_update_step
         )
@@ -471,7 +464,6 @@ def main(config: Config):
     os.makedirs(config._vid_dir, exist_ok=True)
 
     run = wandb.init(
-        # entity=config.ENTITY,
         project=config.PROJECT,
         tags=["MAPPO"],
         config=OmegaConf.to_container(config),
@@ -483,9 +475,12 @@ def main(config: Config):
     wandb_run_id = run.id
     with open(os.path.join(config._exp_dir, "wandb_run_id.txt"), "w") as f:
         f.write(wandb_run_id)
+    
     with jax.disable_jit(False):
         
         scenario = next(data_iter)
+        
+        print(f'@ jit: using scene {scenario.object_metadata.ids.sum()}')
         
         train_jit = jax.jit(make_train(config, checkpoint_manager, env=env, actor_network=actor_network,
                                        scenario=scenario, data_iter=data_iter,

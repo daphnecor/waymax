@@ -16,7 +16,7 @@ class Config:
     NUM_WORKERS: int = 4
     NUM_ENVS: int = 10
     NUM_STEPS: int = 521 
-    TOTAL_TIMESTEPS: float = 1e7
+    TOTAL_TIMESTEPS: float = 2e7
     HIDDEN_DIM: int = 1024
     UPDATE_EPOCHS: int = 4
     NUM_MINIBATCHES: int = 4
@@ -40,7 +40,8 @@ class Config:
     # Observations
     COORDINATE_FRAME: str = 'OBJECT' # Relative coordinate frame
     TOPK_ROADPOINTS: int = 500
-
+    INCLUDE_TLS: bool = True # Maximum visible traffic lights 
+ 
     OFFROAD: float = -1.0
     OVERLAP: float = -1.0
     LOG_DIVERGENCE: float = -1.0

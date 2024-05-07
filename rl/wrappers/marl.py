@@ -30,6 +30,8 @@ from waymax.datatypes import observation
 from waymax.datatypes import roadgraph
 from waymax.datatypes.simulator_state import SimulatorState
 from waymax.datatypes import get_control_mask
+from waymax.datatypes import operations
+
 
 @struct.dataclass
 class WaymaxLogEnvState:
@@ -93,11 +95,6 @@ class WaymaxLogWrapper(JaxMARLWrapper):
           
         return obs, state, reward, done, info
 
-
-
-OBSERVE_ROADGRAPH = False
-
-
 class WaymaxWrapper(JaxMARLWrapper):
     """
     Provides a `"world_state"` observation for the centralised critic.
@@ -115,7 +112,9 @@ class WaymaxWrapper(JaxMARLWrapper):
         ]
         
         # Size of each agent's observation (including other agents and rg points)
-        self._agent_obs_size = self.num_agents * 7 + env.config.observation.roadgraph_top_k * 7
+        self._agent_obs_size = ( 
+            self.num_agents * 7 + env.config.observation.roadgraph_top_k * 7 + (5 * 16) # TLS
+        )
 
         self.world_state_fn = self.ws_just_env_state
 
@@ -130,7 +129,7 @@ class WaymaxWrapper(JaxMARLWrapper):
             i: Box(low=-1.0, high=1.0, shape=(self._world_state_size,)) for i in self.agents
         }
         self.action_spaces = {
-            i: Box(low=-2, high=2.0, shape=(2,)) for i in self.agents 
+            i: Box(low=-1, high=1.0, shape=(2,)) for i in self.agents 
         }
 
     def observation_space(self, agent: str):
@@ -143,14 +142,19 @@ class WaymaxWrapper(JaxMARLWrapper):
 
     @partial(jax.jit, static_argnums=0)
     def get_obs(env, env_state):
-        
+   
         # Get global sim trajectory
         global_traj = datatypes.dynamic_index(
             env_state.sim_trajectory, env_state.timestep, axis=-1, keepdims=True
         )
         
+        # Global traffic light information
+        # Shape is (num_tls, 1) --> see datatypes/traffic_lights.py
+        current_global_tl = operations.dynamic_slice(
+            env_state.log_traffic_light, jnp.array(env_state.timestep, int), 1, axis=-1
+        )
+        
         obs = {}
-        # agent_ids = jnp.eye(env.num_agents)
 
         for idx in range(env.config.max_num_objects):
 
@@ -161,20 +165,35 @@ class WaymaxWrapper(JaxMARLWrapper):
                 topk=env.config.observation.roadgraph_top_k,
             )
             
+            # Get agent pose: Position, orientation, and rotation matrix
             pose = observation.ObjectPose2D.from_center_and_yaw(
                 xy=env_state.sim_trajectory.xy[idx, env_state.timestep],
                 yaw=env_state.sim_trajectory.yaw[idx, env_state.timestep],
                 valid=env_state.sim_trajectory.valid[idx, env_state.timestep],
             )
             
+            # Transform to relative coordinates using agent i's pose
             sim_traj = observation.transform_trajectory(global_traj, pose)
-            exp_rg = observation.transform_roadgraph_points(global_rg, pose)
+            local_rg = observation.transform_roadgraph_points(global_rg, pose)
+            local_tl = observation.transform_traffic_lights(current_global_tl, pose)
             
+            # Unpack traffic lights, there are a maximum of 16 traffic lights per scene
+            # Not all traffic lights are valid
+            valid_tl_ids = local_tl.valid.reshape(-1)
+            
+            tl_valid_states = jnp.where(valid_tl_ids, local_tl.state.reshape(-1), 0)
+            tl_x_valid = jnp.where(valid_tl_ids, local_tl.x.reshape(-1), 0)
+            tl_y_valid = jnp.where(valid_tl_ids, local_tl.y.reshape(-1), 0)
+            tl_z_valid = jnp.where(valid_tl_ids, local_tl.z.reshape(-1), 0)
+            tl_lane_ids_valid = jnp.where(valid_tl_ids, local_tl.lane_ids.reshape(-1), 0)
+            
+            # Construct agent observation
             agent_obs = jnp.concatenate((
                 sim_traj.xyz.reshape(-1), sim_traj.yaw.reshape(-1),
                 sim_traj.vel_xy.reshape(-1), sim_traj.vel_yaw.reshape(-1),
-                exp_rg.xyz.reshape(-1), exp_rg.dir_xyz.reshape(-1),
-                exp_rg.types.reshape(-1), # agent_ids[idx],
+                local_rg.xyz.reshape(-1), local_rg.dir_xyz.reshape(-1),
+                local_rg.types.reshape(-1), tl_valid_states, tl_x_valid, 
+                tl_y_valid, tl_z_valid, tl_lane_ids_valid
             ))
         
             obs[f'object_{idx}'] = agent_obs
