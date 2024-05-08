@@ -88,7 +88,7 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     else:
         # Configure dataset
         t_data_iter_start = perf_counter()
-        dataset_config = dataclasses.replace(_config.WOD_1_0_0_VALIDATION, max_num_objects=config.MAX_NUM_OBJECTS)
+        dataset_config = dataclasses.replace(_config.WOD_1_0_0_TRAINING, max_num_objects=config.MAX_NUM_OBJECTS)
         data_iter = dataloader.simulator_state_generator(config=dataset_config)
         t_data_iter_end = perf_counter()
     
@@ -309,12 +309,23 @@ def make_sim_render_episode(config: Config, actor_network, env):
 
     return jax.jit(sim_render_episode)
 
-# states = []
-# rng, obs, state, done, actor_hidden = (rng, init_obs, init_state, done, actor_hidden)
-# for i in range(remaining_timesteps):
-#     carry, state = step_env((rng, obs, state, done, actor_hidden), None)
-#     rng, obs, state, done, actor_hidden = carry
-#     states.append(state)
+def convert_list_to_pytree(list_of_scenarios):
+    """Convert list of scenarios to pytree object."""
+    # Flatten each tree
+    flat_trees_treedefs = [jax.tree.flatten(tree) for tree in list_of_scenarios]
+    flat_trees, treedefs = zip(*flat_trees_treedefs)
+    # Concatenate the flattened lists
+    concatenated_leaves = [jnp.stack(leaves) for leaves in zip(*flat_trees)]
+    # Rebuild PyTree
+    return jax.tree.unflatten(treedefs[0], concatenated_leaves)
+
+def sample_from_pytree_callback(scenario_py_tree, idx=0, rng=0):
+    """Sample a batch of scenes."""
+    
+    # Select scenario from pytree
+    scene_batch_pytree = jax.tree.map(lambda x: x[idx], scenario_py_tree)
+    
+    return scene_batch_pytree
 
     
 def render_callback(states: WaymaxLogEnvState, save_dir: str, t: int):

@@ -14,8 +14,8 @@ class Config:
     BATCH_SIZE: int = 521
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
-    NUM_ENVS: int = 10
-    NUM_STEPS: int = 521 
+    NUM_ENVS: int = 2
+    NUM_STEPS: int = 128 
     TOTAL_TIMESTEPS: float = 2e7
     HIDDEN_DIM: int = 1024
     UPDATE_EPOCHS: int = 4
@@ -35,6 +35,8 @@ class Config:
     OVERWRITE: bool = True
     CKPT_FREQ: int = 50
     RENDER_FREQ: int = 20
+    TRAIN_ON_K_SCENES: int = 2
+    SAMPLE_NEW_SCENE_BATCH_FREQ: int = 1
     EXP_NAME: Optional[str] = None
     
     # Observations
@@ -59,6 +61,7 @@ class Config:
     _minibatch_size: int = -1
     _num_updates: int = -1
     _exp_dir: str = ""
+    _scene_dir: str = ""
     _ckpt_DIR: str = ""
     _vid_dir: str = ""
 
