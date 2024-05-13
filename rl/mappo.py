@@ -398,8 +398,8 @@ def make_train(
             )
             metric["loss"] = loss_info
      
-            metric["obs_dist_min"] = traj_batch.obs.max()
-            metric["obs_dist_max"] = traj_batch.obs.min()
+            metric["obs_dist_min"] = traj_batch.obs.min()
+            metric["obs_dist_max"] = traj_batch.obs.max()
             metric["obs_dist_std"] = traj_batch.obs.std()
             metric["act_dist_mean"] = traj_batch.action.mean()
             metric["act_dist_std"] = traj_batch.action.std()

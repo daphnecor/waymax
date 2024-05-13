@@ -36,6 +36,8 @@ class Config:
     CKPT_FREQ: int = 300
     RENDER_FREQ: int = 20
     EXP_NAME: Optional[str] = None
+    TRAIN_ON_K_SCENES: int = 100
+    SAMPLE_NEW_SCENE_BATCH_FREQ: int = 1
     
     # Observations
     COORDINATE_FRAME: str = 'OBJECT' # Relative coordinate frame
