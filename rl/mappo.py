@@ -38,18 +38,39 @@ class Transition(NamedTuple):
     avail_actions: jnp.ndarray
     control_mask: jnp.ndarray 
 
+def convert_list_to_pytree(list_of_scenarios):
+    """Convert list of scenarios to pytree object."""
+    # Flatten each tree
+    flat_trees_treedefs = [jax.tree.flatten(tree) for tree in list_of_scenarios]
+    flat_trees, treedefs = zip(*flat_trees_treedefs)
+    # Concatenate the flattened lists
+    concatenated_leaves = [jnp.stack(leaves) for leaves in zip(*flat_trees)]
+    # Rebuild PyTree
+    return jax.tree.unflatten(treedefs[0], concatenated_leaves)
+
+def sample_from_pytree_callback(scenario_py_tree, idx):
+    """Sample a batch of scenes."""
+    
+    # Select scenario from pytree
+    scene_batch_pytree = jax.tree.map(lambda x: x[idx], scenario_py_tree)
+    
+    return scene_batch_pytree
 
 def make_train(
-    config,
+    config, 
     checkpoint_manager,
     actor_network, 
-    env, 
-    scenario, 
-    data_iter, 
+    env,  
+    scene_pytree, 
+    batch_size,
     latest_update_step, 
-    wandb_run_id
+    wandb_run_id,
+    scenario,
+    sample_scene
 ):
+    # Define which parts of the callback we don't want to trace
     _render_callback = partial(render_callback, save_dir=config._vid_dir)
+    _sample_from_pytree_callback = partial(sample_from_pytree_callback, scenario_py_tree=scene_pytree)
 
     def train(rng, runner_state=None):
 
@@ -63,15 +84,23 @@ def make_train(
         num_render_actors = 1 * env.num_agents
         ac_init_hstate_render = ScannedRNN.initialize_carry(num_render_actors, config.HIDDEN_DIM)
         render_states = jit_sim_render_episode(runner_state.train_states[0].params, ac_init_hstate_render, scenario)
-        jax.experimental.io_callback(_render_callback, None, states=render_states, t=0)
-
+                
+        # DEFINE CALLBACKS
+        jax.experimental.io_callback(callback=_render_callback, result_shape_dtypes=None, states=render_states, t=0)
+        
         # TRAIN LOOP
         def _update_step_with_render(update_runner_state, unused, render_states):
             
-            scenario = next(data_iter) # This is only executed a single time
+            rng, _ = jax.random.split(update_runner_state[0].rng)
+            rand_scenario_idx = jax.random.randint(rng, (1,), 0, config.TRAIN_ON_K_SCENES)[0]
+            scenario = jax.experimental.io_callback(
+                callback=_sample_from_pytree_callback, 
+                result_shape_dtypes=jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), sample_scene),
+                idx=rand_scenario_idx,
+            )
             
             jax.debug.print("@ _update_step_with_render: using scene {}", scenario.object_metadata.ids.sum())
-            
+        
             # COLLECT TRAJECTORIES
             runner_state, update_steps = update_runner_state
             
@@ -121,7 +150,7 @@ def make_train(
                     last_done[np.newaxis, :],
                 )
                 cr_hstate, value = critic_network.apply(train_states[1].params, hstates[1], cr_in)
-
+                
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
@@ -409,11 +438,11 @@ def make_train(
             jax.experimental.io_callback(callback, None, metric)
             update_steps = update_steps + 1
             runner_state = RunnerState(train_states, env_state, last_obs, last_done, hstates, rng)
-            do_render = update_steps % config.RENDER_FREQ == 0
+            do_render = update_steps % config.RENDER_FREQ == 0 
             
             render_states = jax.lax.cond(
                 do_render,
-                partial(jit_sim_render_episode, runner_state.train_states[0].params, ac_init_hstate_render, scenario),
+                partial(jit_sim_render_episode, runner_state.train_states[0].params, ac_init_hstate_render, scenario=scenario),
                 lambda: render_states,
             )
             jax.lax.cond(
@@ -426,10 +455,12 @@ def make_train(
                 partial(jax.experimental.io_callback, ckpt_callback, None, metric, runner_state),
                 lambda: None,
             )
+                        
             return (runner_state, update_steps), metric
-
+        
+        
         _update_step = functools.partial(_update_step_with_render, render_states=render_states)
-
+        
         runner_state, metric = jax.lax.scan(
             _update_step,   
             (runner_state, latest_update_step), None, config._num_updates - latest_update_step
@@ -438,7 +469,6 @@ def make_train(
         return {"runner_state": runner_state} 
 
     return train
-
     
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(config: Config):
@@ -457,7 +487,17 @@ def main(config: Config):
     
     runner_state, actor_network, env, scenario, latest_update_step, data_iter = \
         init_run(config, checkpoint_manager, latest_update_step, rng)
-
+    
+    # Create pytree with scenarios
+    list_of_scenarios = []
+    for _ in range(config.TRAIN_ON_K_SCENES):
+        list_of_scenarios.append(next(data_iter))
+        
+    scenario_pytree = convert_list_to_pytree(list_of_scenarios)
+    
+    # Transfer pytree to cpu memory (otherwise we go OOM)
+    jax.device_put(x=scenario_pytree, device=jax.devices("cpu")[0])
+            
     if latest_update_step is not None:
         runner_state, wandb_run_id = restore_run(config, runner_state, checkpoint_manager, latest_update_step)
         wandb_resume = "Must"
@@ -484,9 +524,9 @@ def main(config: Config):
     
     with jax.disable_jit(False):
         
-        scenario = next(data_iter)
-        
         print(f'@ jit: using scene {scenario.object_metadata.ids.sum()}')
+        
+        sample_scene = sample_from_pytree_callback(scenario_pytree, idx=0)
         
         train_jit = jax.jit(
             make_train(
@@ -494,10 +534,12 @@ def main(config: Config):
                 checkpoint_manager=checkpoint_manager, 
                 env=env, 
                 actor_network=actor_network,
-                scenario=scenario, 
-                data_iter=data_iter,
                 latest_update_step=latest_update_step, 
-                wandb_run_id=run.id
+                wandb_run_id=run.id,
+                scenario=scenario, 
+                batch_size=jnp.array((1)),
+                scene_pytree=scenario_pytree,
+                sample_scene=sample_scene,
             )
         ) 
         
@@ -507,6 +549,5 @@ def main(config: Config):
     n_updates = runner_state[-1]
     runner_state: RunnerState = runner_state[0]
 
-    
 if __name__=="__main__":
     main()
