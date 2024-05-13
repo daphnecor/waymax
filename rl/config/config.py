@@ -16,7 +16,7 @@ class Config:
     NUM_WORKERS: int = 4
     NUM_ENVS: int = 10
     NUM_STEPS: int = 521 
-    TOTAL_TIMESTEPS: float = 2e7
+    TOTAL_TIMESTEPS: float = 3e7
     HIDDEN_DIM: int = 1024
     UPDATE_EPOCHS: int = 4
     NUM_MINIBATCHES: int = 4
@@ -33,7 +33,7 @@ class Config:
     SEED: int = 1
     ANNEAL_LR: bool = False
     OVERWRITE: bool = True
-    CKPT_FREQ: int = 50
+    CKPT_FREQ: int = 300
     RENDER_FREQ: int = 20
     EXP_NAME: Optional[str] = None
     
@@ -49,7 +49,7 @@ class Config:
     # WandB Params
     WANDB_MODE: str = 'run'  # one of: 'offline', 'run', 'dryrun', 'shared', 'disabled', 'online'
     ENTITY: str = ''
-    PROJECT: str = 'waymax'
+    PROJECT: str = 'wosac'
 
     # DO NOT CHANGE THIS. It is dark magic?
     MAX_NUM_OBJECTS: int = 10

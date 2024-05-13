@@ -13,7 +13,6 @@ import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
 from flax.linen.initializers import constant, orthogonal
-# from flax.training import orbax_utils
 import numpy as np
 import orbax.checkpoint as ocp
 import wandb
@@ -40,8 +39,16 @@ class Transition(NamedTuple):
     control_mask: jnp.ndarray 
 
 
-def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
-               actor_network, env, scenario, data_iter, latest_update_step, wandb_run_id):
+def make_train(
+    config,
+    checkpoint_manager,
+    actor_network, 
+    env, 
+    scenario, 
+    data_iter, 
+    latest_update_step, 
+    wandb_run_id
+):
     _render_callback = partial(render_callback, save_dir=config._vid_dir)
 
     def train(rng, runner_state=None):
@@ -61,7 +68,7 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
         # TRAIN LOOP
         def _update_step_with_render(update_runner_state, unused, render_states):
             
-            scenario = next(data_iter)
+            scenario = next(data_iter) # This is only executed a single time
             
             jax.debug.print("@ _update_step_with_render: using scene {}", scenario.object_metadata.ids.sum())
             
@@ -425,7 +432,6 @@ def make_train(config: Config, checkpoint_manager: ocp.CheckpointManager,
 
         runner_state, metric = jax.lax.scan(
             _update_step,   
-            # _update_step, 
             (runner_state, latest_update_step), None, config._num_updates - latest_update_step
         )
         
@@ -482,9 +488,19 @@ def main(config: Config):
         
         print(f'@ jit: using scene {scenario.object_metadata.ids.sum()}')
         
-        train_jit = jax.jit(make_train(config, checkpoint_manager, env=env, actor_network=actor_network,
-                                       scenario=scenario, data_iter=data_iter,
-                                       latest_update_step=latest_update_step, wandb_run_id=run.id)) 
+        train_jit = jax.jit(
+            make_train(
+                config=config, 
+                checkpoint_manager=checkpoint_manager, 
+                env=env, 
+                actor_network=actor_network,
+                scenario=scenario, 
+                data_iter=data_iter,
+                latest_update_step=latest_update_step, 
+                wandb_run_id=run.id
+            )
+        ) 
+        
         out = train_jit(rng, runner_state=runner_state)
 
     runner_state = out["runner_state"]
