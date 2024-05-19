@@ -28,7 +28,7 @@ def create_netty_actor(
     is_controlled_func: Defines which objects are controlled by this actor.
 
   Returns:
-    An statelss actor that drives the controlled objects with constant speed.
+    An stateless actor that drives the controlled objects with constant speed.
   """
 
   # TODO: Initialize the environment here

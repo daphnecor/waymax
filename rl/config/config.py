@@ -14,9 +14,9 @@ class Config:
     BATCH_SIZE: int = 521
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
-    NUM_ENVS: int = 10
-    NUM_STEPS: int = 521 
-    TOTAL_TIMESTEPS: float = 3e7
+    NUM_ENVS: int = 15
+    NUM_STEPS: int = 512 
+    TOTAL_TIMESTEPS: float = 1e8
     HIDDEN_DIM: int = 1024
     UPDATE_EPOCHS: int = 4
     NUM_MINIBATCHES: int = 4
@@ -34,19 +34,19 @@ class Config:
     ANNEAL_LR: bool = False
     OVERWRITE: bool = True
     CKPT_FREQ: int = 300
-    RENDER_FREQ: int = 20
+    RENDER_FREQ: int = 100
     EXP_NAME: Optional[str] = None
-    TRAIN_ON_K_SCENES: int = 100
+    TRAIN_ON_K_SCENES: int = 1
     SAMPLE_NEW_SCENE_BATCH_FREQ: int = 1
     
     # Observations
     COORDINATE_FRAME: str = 'OBJECT' # Relative coordinate frame
+    NORMALIZE_OBS: bool = True
     TOPK_ROADPOINTS: int = 500
-    INCLUDE_TLS: bool = True # Maximum visible traffic lights 
  
-    OFFROAD: float = -1.0
-    OVERLAP: float = -1.0
-    LOG_DIVERGENCE: float = -1.0
+    OFFROAD: float = -0.1
+    OVERLAP: float = -0.1
+    LOG_DIVERGENCE: float = -0.1
 
     # WandB Params
     WANDB_MODE: str = 'run'  # one of: 'offline', 'run', 'dryrun', 'shared', 'disabled', 'online'

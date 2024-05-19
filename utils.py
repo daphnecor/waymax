@@ -160,8 +160,8 @@ def init_run(config: Config, ckpt_manager, latest_update_step, rng):
     print(f"--- DATA ITER COSTS = {t_data_iter_end - t_data_iter_start} s ---")
     print(f"--- NEXT DATA ITER COSTS = {t_next_end - t_next_start} s ---")
 
-    actor_network = ActorBox(env.action_space(env.agents[0]).shape[0],
-                             subnet=ActorRNN(env.action_space(env.agents[0]).shape[0], config=config,
+    actor_network = ActorBox(
+        env.action_space(env.agents[0]).shape[0], subnet=ActorRNN(env.action_space(env.agents[0]).shape[0], config=config,
                             #  subnet=ActorMLP(env.action_space(env.agents[0]).shape[0], config=config,
                                              ))
     critic_network = CriticRNN(config=config)

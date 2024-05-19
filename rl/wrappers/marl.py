@@ -112,8 +112,10 @@ class WaymaxWrapper(JaxMARLWrapper):
         ]
         
         # Size of each agent's observation (including other agents and rg points)
+        # Shape explained: RG = (x, y, z, type), TL = (state, x, y, lane_id)
+        # 6 = (traj_info, yaw_info, vel_xy_info, roadgraph_info)
         self._agent_obs_size = ( 
-            self.num_agents * 7 + env.config.observation.roadgraph_top_k * 7 + (5 * 16) # TLS
+            self.num_agents * 7 + env.config.observation.roadgraph_top_k * 4 #+ (4 * 16) # TLS
         )
 
         self.world_state_fn = self.ws_just_env_state
@@ -142,6 +144,15 @@ class WaymaxWrapper(JaxMARLWrapper):
 
     @partial(jax.jit, static_argnums=0)
     def get_obs(env, env_state):
+        
+        MAX_REL_XYZ = 25_000
+        MIN_REL_XYZ = -25_000
+        MAX_VEL_XYZ = 70
+        MIN_VEL_XYZ = -70
+        
+        def _norm(x, min_val, max_val):
+            """Normalize to range [-1, 1]."""
+            return 2 * ((x - min_val) / (max_val - min_val)) - 1
    
         # Get global sim trajectory
         global_traj = datatypes.dynamic_index(
@@ -149,7 +160,7 @@ class WaymaxWrapper(JaxMARLWrapper):
         )
         
         # Global traffic light information
-        # Shape is (num_tls, 1) --> see datatypes/traffic_lights.py
+        # Shape is (num_tls = 16, 1) --> see datatypes/traffic_lights.py
         current_global_tl = operations.dynamic_slice(
             env_state.log_traffic_light, jnp.array(env_state.timestep, int), 1, axis=-1
         )
@@ -184,28 +195,62 @@ class WaymaxWrapper(JaxMARLWrapper):
             tl_valid_states = jnp.where(valid_tl_ids, local_tl.state.reshape(-1), 0)
             tl_x_valid = jnp.where(valid_tl_ids, local_tl.x.reshape(-1), 0)
             tl_y_valid = jnp.where(valid_tl_ids, local_tl.y.reshape(-1), 0)
-            tl_z_valid = jnp.where(valid_tl_ids, local_tl.z.reshape(-1), 0)
             tl_lane_ids_valid = jnp.where(valid_tl_ids, local_tl.lane_ids.reshape(-1), 0)
+                        
+            traj_info = sim_traj.xyz.reshape(-1)
+            yaw_info = sim_traj.yaw.reshape(-1)
+            vel_xy_info = sim_traj.vel_xy.reshape(-1)
+            vel_yaw_info = sim_traj.vel_yaw.reshape(-1)
             
+            # Road graph information: x, y, z, type
+            roadgraph_info = jnp.concatenate(
+                (local_rg.xyz.reshape(-1), 
+                local_rg.dir_xyz.reshape(-1),
+                local_rg.types.reshape(-1)),
+            )
+            
+            # # Construct agent observation
+            # agent_obs = jnp.concatenate((
+            #     traj_info, 
+            #     yaw_info,
+            #     vel_xy_info,
+            #     vel_yaw_info,
+            #     roadgraph_info,
+            #     tl_valid_states,
+            #     tl_x_valid,
+            #     tl_y_valid,
+            #     tl_lane_ids_valid
+            # ))
+            
+            #traj_info = _norm(traj_info, MIN_REL_XYZ, MAX_REL_XYZ)
+            #yaw_info = yaw_info / 2 * jnp.pi
+            #vel_xy_info = _norm(vel_xy_info, MIN_VEL_XYZ, MAX_VEL_XYZ)
+            #vel_yaw_info = vel_yaw_info / 2 * jnp.pi
+            #roadgraph_info = _norm(roadgraph_info, MIN_REL_XYZ, MAX_REL_XYZ)
+            tl_x_valid = _norm(tl_x_valid, MIN_REL_XYZ, MAX_REL_XYZ)
+            tl_y_valid = _norm(tl_y_valid, MIN_REL_XYZ, MAX_REL_XYZ)
+                    
             # Construct agent observation
             agent_obs = jnp.concatenate((
-                sim_traj.xyz.reshape(-1), sim_traj.yaw.reshape(-1),
-                sim_traj.vel_xy.reshape(-1), sim_traj.vel_yaw.reshape(-1),
-                local_rg.xyz.reshape(-1), local_rg.dir_xyz.reshape(-1),
-                local_rg.types.reshape(-1), tl_valid_states, tl_x_valid, 
-                tl_y_valid, tl_z_valid, tl_lane_ids_valid
+                traj_info, 
+                yaw_info,
+                vel_xy_info,
+                roadgraph_info,
+                #tl_valid_states,
+                #tl_x_valid,
+                #tl_y_valid,
+                #tl_lane_ids_valid
             ))
-        
+                
             obs[f'object_{idx}'] = agent_obs
-
+    
         obs.update(
             {
                 "world_state": jnp.stack([obs[agent] for agent in env.agents])
             }
         )
-                       
+                           
         return obs
-        
 
     def get_avail_actions(self, state: SimulatorState):
         traj = datatypes.dynamic_index(
