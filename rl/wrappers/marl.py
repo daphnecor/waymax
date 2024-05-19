@@ -32,6 +32,9 @@ from waymax.datatypes.simulator_state import SimulatorState
 from waymax.datatypes import get_control_mask
 from waymax.datatypes import operations
 
+#TODO: Put in config
+NORMALIZE_OBS = True
+NUM_TYPE_CLASSES = 20
 
 @struct.dataclass
 class WaymaxLogEnvState:
@@ -112,11 +115,18 @@ class WaymaxWrapper(JaxMARLWrapper):
         ]
         
         # Size of each agent's observation (including other agents and rg points)
-        # Shape explained: RG = (x, y, z, type), TL = (state, x, y, lane_id)
+        # Shape explained: RG = (x, y, z, type=20, one hot), TL = (state, x, y, lane_id)
         # 6 = (traj_info, yaw_info, vel_xy_info, roadgraph_info)
-        self._agent_obs_size = ( 
-            self.num_agents * 7 + env.config.observation.roadgraph_top_k * 4 #+ (4 * 16) # TLS
-        )
+        if NORMALIZE_OBS:
+            self._agent_obs_size = ( 
+                self.num_agents * 6 + 
+                env.config.observation.roadgraph_top_k * 3 + 
+                env.config.observation.roadgraph_top_k * NUM_TYPE_CLASSES #+ (4 * 16) # TLS
+            )
+        else:
+            self._agent_obs_size = ( 
+                self.num_agents * 6 + env.config.observation.roadgraph_top_k * 4 #+ (4 * 16) # TLS
+            )
 
         self.world_state_fn = self.ws_just_env_state
 
@@ -144,112 +154,73 @@ class WaymaxWrapper(JaxMARLWrapper):
 
     @partial(jax.jit, static_argnums=0)
     def get_obs(env, env_state):
-        
-        MAX_REL_XYZ = 25_000
+        """Construct agent observations from SimulatorState object."""
+    
+        #TODO: Put in config
         MIN_REL_XYZ = -25_000
-        MAX_VEL_XYZ = 70
-        MIN_VEL_XYZ = -70
-        
+        MAX_REL_XYZ = 25_000
+        MIN_VEL_XY = -70
+        MAX_VEL_XY = 70
+                
         def _norm(x, min_val, max_val):
             """Normalize to range [-1, 1]."""
             return 2 * ((x - min_val) / (max_val - min_val)) - 1
-   
-        # Get global sim trajectory
+        
+
         global_traj = datatypes.dynamic_index(
             env_state.sim_trajectory, env_state.timestep, axis=-1, keepdims=True
         )
-        
-        # Global traffic light information
-        # Shape is (num_tls = 16, 1) --> see datatypes/traffic_lights.py
         current_global_tl = operations.dynamic_slice(
             env_state.log_traffic_light, jnp.array(env_state.timestep, int), 1, axis=-1
         )
-        
+
         obs = {}
 
         for idx in range(env.config.max_num_objects):
 
-            # Get global roadgraph points
             global_rg = roadgraph.filter_topk_roadgraph_points(
                 env_state.roadgraph_points,
                 env_state.sim_trajectory.xy[idx, env_state.timestep],
                 topk=env.config.observation.roadgraph_top_k,
             )
-            
-            # Get agent pose: Position, orientation, and rotation matrix
+
             pose = observation.ObjectPose2D.from_center_and_yaw(
                 xy=env_state.sim_trajectory.xy[idx, env_state.timestep],
                 yaw=env_state.sim_trajectory.yaw[idx, env_state.timestep],
                 valid=env_state.sim_trajectory.valid[idx, env_state.timestep],
             )
-            
-            # Transform to relative coordinates using agent i's pose
+
             sim_traj = observation.transform_trajectory(global_traj, pose)
             local_rg = observation.transform_roadgraph_points(global_rg, pose)
             local_tl = observation.transform_traffic_lights(current_global_tl, pose)
-            
-            # Unpack traffic lights, there are a maximum of 16 traffic lights per scene
-            # Not all traffic lights are valid
-            valid_tl_ids = local_tl.valid.reshape(-1)
-            
-            tl_valid_states = jnp.where(valid_tl_ids, local_tl.state.reshape(-1), 0)
-            tl_x_valid = jnp.where(valid_tl_ids, local_tl.x.reshape(-1), 0)
-            tl_y_valid = jnp.where(valid_tl_ids, local_tl.y.reshape(-1), 0)
-            tl_lane_ids_valid = jnp.where(valid_tl_ids, local_tl.lane_ids.reshape(-1), 0)
-                        
-            traj_info = sim_traj.xyz.reshape(-1)
-            yaw_info = sim_traj.yaw.reshape(-1)
-            vel_xy_info = sim_traj.vel_xy.reshape(-1)
-            vel_yaw_info = sim_traj.vel_yaw.reshape(-1)
-            
-            # Road graph information: x, y, z, type
-            roadgraph_info = jnp.concatenate(
-                (local_rg.xyz.reshape(-1), 
-                local_rg.dir_xyz.reshape(-1),
-                local_rg.types.reshape(-1)),
-            )
-            
-            # # Construct agent observation
-            # agent_obs = jnp.concatenate((
-            #     traj_info, 
-            #     yaw_info,
-            #     vel_xy_info,
-            #     vel_yaw_info,
-            #     roadgraph_info,
-            #     tl_valid_states,
-            #     tl_x_valid,
-            #     tl_y_valid,
-            #     tl_lane_ids_valid
-            # ))
-            
-            #traj_info = _norm(traj_info, MIN_REL_XYZ, MAX_REL_XYZ)
-            #yaw_info = yaw_info / 2 * jnp.pi
-            #vel_xy_info = _norm(vel_xy_info, MIN_VEL_XYZ, MAX_VEL_XYZ)
-            #vel_yaw_info = vel_yaw_info / 2 * jnp.pi
-            #roadgraph_info = _norm(roadgraph_info, MIN_REL_XYZ, MAX_REL_XYZ)
-            tl_x_valid = _norm(tl_x_valid, MIN_REL_XYZ, MAX_REL_XYZ)
-            tl_y_valid = _norm(tl_y_valid, MIN_REL_XYZ, MAX_REL_XYZ)
-                    
-            # Construct agent observation
-            agent_obs = jnp.concatenate((
-                traj_info, 
-                yaw_info,
-                vel_xy_info,
-                roadgraph_info,
-                #tl_valid_states,
-                #tl_x_valid,
-                #tl_y_valid,
-                #tl_lane_ids_valid
-            ))
-                
+
+            if NORMALIZE_OBS:
+                agent_obs = jnp.concatenate((
+                    _norm(sim_traj.xyz, MIN_REL_XYZ, MAX_REL_XYZ).reshape(-1), 
+                    _norm(sim_traj.vel_xy, MIN_VEL_XY, MAX_VEL_XY).reshape(-1),
+                    _norm(sim_traj.yaw, -2*jnp.pi, 2*jnp.pi).reshape(-1),
+                    _norm(local_rg.xyz, MIN_REL_XYZ, MAX_REL_XYZ).reshape(-1),
+                    # One hot encode the road point types (value between 0 and 19)
+                    jax.nn.one_hot(local_rg.types, num_classes=NUM_TYPE_CLASSES).reshape(-1),
+                ))
+            else:
+                agent_obs = jnp.concatenate((
+                    sim_traj.xyz.reshape(-1), 
+                    sim_traj.vel_xy.reshape(-1),
+                    sim_traj.yaw.reshape(-1),
+                    local_rg.xyz.reshape(-1),
+                    local_rg.types.reshape(-1),
+                ))
+
             obs[f'object_{idx}'] = agent_obs
-    
+
+       
         obs.update(
             {
                 "world_state": jnp.stack([obs[agent] for agent in env.agents])
             }
         )
-                           
+                         
         return obs
 
     def get_avail_actions(self, state: SimulatorState):

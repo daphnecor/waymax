@@ -11,13 +11,13 @@ from dataclasses import dataclass
 @dataclass
 class Config:
     LR: float = 3e-4
-    BATCH_SIZE: int = 521
+    BATCH_SIZE: int = 512
     EPOCHS: int = 10
     NUM_WORKERS: int = 4
-    NUM_ENVS: int = 15
+    NUM_ENVS: int = 10
     NUM_STEPS: int = 512 
     TOTAL_TIMESTEPS: float = 1e8
-    HIDDEN_DIM: int = 1024
+    HIDDEN_DIM: int = 512
     UPDATE_EPOCHS: int = 4
     NUM_MINIBATCHES: int = 4
     GAMMA: float = 0.99
