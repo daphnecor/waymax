@@ -15,6 +15,7 @@ from flax import struct
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from time import perf_counter
+from gymnax.environments.spaces import Discrete
 
 from rl.environments.spaces import Box
 from rl.environments.multi_agent_env import MultiAgentEnv, State
@@ -52,6 +53,7 @@ class WaymaxLogWrapper(JaxMARLWrapper):
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, scenario, key: chex.PRNGKey) -> Tuple[chex.Array, State]:
+        
         obs, env_state = self._env.reset(scenario, key)
         state = WaymaxLogEnvState(
             env_state,
@@ -99,51 +101,43 @@ class WaymaxLogWrapper(JaxMARLWrapper):
         return obs, state, reward, done, info
 
 class WaymaxWrapper(JaxMARLWrapper):
-    """
-    Provides a `"world_state"` observation for the centralised critic.
-    world state observation of dimension: (num_agents, world_state_size)    
-    """
-    
-    def __init__(self,
-                 env: _env.MultiAgentEnvironment,
-                 obs_with_agent_id=False):
+ 
+    def __init__(
+        self,
+        env: _env.MultiAgentEnvironment,
+        obs_with_agent_id=False,
+        action_spaces=None,
+        observation_spaces=None,
+        agents=None,
+    ):
         super().__init__(env)
         self.num_agents = self._env.config.max_num_objects
         self.obs_with_agent_id = obs_with_agent_id
-        self.agents = [
-            f'object_{i}' for i in range(self.num_agents)
-        ]
+        
+        if agents is None:
+            self.agents = [f"agent_{i}" for i in range(self.num_agents)]
         
         # Size of each agent's observation (including other agents and rg points)
         # Shape explained: RG = (x, y, z, type=20, one hot), TL = (state, x, y, lane_id)
         # 6 = (traj_info, yaw_info, vel_xy_info, roadgraph_info)
         if NORMALIZE_OBS:
-            self._agent_obs_size = ( 
+            self.obs_size = ( 
                 self.num_agents * 6 + 
                 env.config.observation.roadgraph_top_k * 3 + 
                 env.config.observation.roadgraph_top_k * NUM_TYPE_CLASSES #+ (4 * 16) # TLS
             )
         else:
-            self._agent_obs_size = ( 
+            self.obs_size = ( 
                 self.num_agents * 6 + env.config.observation.roadgraph_top_k * 4 #+ (4 * 16) # TLS
             )
 
-        self.world_state_fn = self.ws_just_env_state
-
-        if not self.obs_with_agent_id:
-            self._world_state_size = self._agent_obs_size
-            self.world_state_fn = self.ws_just_env_state
-        else:
-            self._world_state_size = self._agent_obs_size + self.num_agents
-            self.world_state_fn = self.ws_with_agent_id
-
-        self.observation_spaces = {
-            i: Box(low=-1.0, high=1.0, shape=(self._world_state_size,)) for i in self.agents
-        }
-        self.action_spaces = {
-            i: Box(low=-1, high=1.0, shape=(2,)) for i in self.agents 
-        }
-
+        if action_spaces is None:
+            self.action_spaces = {
+                i: Box(low=-1, high=1.0, shape=(2,)) for i in self.agents 
+            }
+        if observation_spaces is None:
+            self.observation_spaces = {i: Box(low=-1.0, high=1.0, shape=(self.obs_size,)) for i in self.agents}
+            
     def observation_space(self, agent: str):
         """Observation space for a given agent."""
         return self.observation_spaces[agent]
@@ -166,7 +160,6 @@ class WaymaxWrapper(JaxMARLWrapper):
             """Normalize to range [-1, 1]."""
             return 2 * ((x - min_val) / (max_val - min_val)) - 1
         
-
         global_traj = datatypes.dynamic_index(
             env_state.sim_trajectory, env_state.timestep, axis=-1, keepdims=True
         )
@@ -212,15 +205,8 @@ class WaymaxWrapper(JaxMARLWrapper):
                     local_rg.types.reshape(-1),
                 ))
 
-            obs[f'object_{idx}'] = agent_obs
+            obs[f'agent_{idx}'] = agent_obs
 
-       
-        obs.update(
-            {
-                "world_state": jnp.stack([obs[agent] for agent in env.agents])
-            }
-        )
-                         
         return obs
 
     def get_avail_actions(self, state: SimulatorState):
@@ -238,13 +224,9 @@ class WaymaxWrapper(JaxMARLWrapper):
         return control_mask
     
     @partial(jax.jit, static_argnums=0)
-    def reset(self,
-              scenario,
-              key):
-        """TODO: Add me."""
+    def reset(self, scenario, key):
         env_state = self._env.reset(scenario, key)
         obs = self.get_obs(env_state)
-        # obs["world_state"] = self.world_state_fn(obs, env_state)
         return obs, env_state
     
     @partial(jax.jit, static_argnums=(0,))
@@ -256,12 +238,7 @@ class WaymaxWrapper(JaxMARLWrapper):
         scenario
     ) -> Tuple[Dict[str, chex.Array], SimulatorState, Dict[str, float], Dict[str, bool], Dict]:
         """Performs step transitions in the environment."""
-        # traj = datatypes.dynamic_index(
-        #         state.sim_trajectory, state.timestep, axis=-1, keepdims=True
-        # )
-        # valid = traj.valid
-
-        # key, key_reset = jax.random.split(key)
+      
         obs_st, states_st, rewards, dones, infos = self.step_env(state, actions)
 
         rewards = {agent: rewards[i] for i, agent in enumerate(self.agents)}
@@ -301,21 +278,3 @@ class WaymaxWrapper(JaxMARLWrapper):
             {agent: True for agent, valid_i in zip(self.agents, valid)}
         )
         return obs, env_state, reward, done, info
-
-    @partial(jax.jit, static_argnums=0)
-    def ws_just_env_state(self, obs, state):
-        #return all_obs
-        world_state = obs["world_state"]
-        world_state = world_state[None].repeat(self._env.num_allies, axis=0)
-        return world_state
-        
-    @partial(jax.jit, static_argnums=0)
-    def ws_with_agent_id(self, obs, state):
-        #all_obs = jnp.array([obs[agent] for agent in self._env.agents])
-        world_state = obs["world_state"]
-        world_state = world_state[None].repeat(self._env.num_allies, axis=0)
-        one_hot = jnp.eye(self._env.num_allies)
-        return jnp.concatenate((world_state, one_hot), axis=1)
-        
-    def world_state_size(self):
-        return self._world_state_size 

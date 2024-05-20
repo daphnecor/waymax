@@ -44,9 +44,9 @@ class Config:
     NORMALIZE_OBS: bool = True
     TOPK_ROADPOINTS: int = 500
  
-    OFFROAD: float = -0.1
-    OVERLAP: float = -0.1
-    LOG_DIVERGENCE: float = -0.1
+    OFFROAD: float = -0.01
+    OVERLAP: float = -0.01
+    LOG_DIVERGENCE: float = -0.01
 
     # WandB Params
     WANDB_MODE: str = 'run'  # one of: 'offline', 'run', 'dryrun', 'shared', 'disabled', 'online'
@@ -57,6 +57,9 @@ class Config:
     MAX_NUM_OBJECTS: int = 10
 
     # DO NOT CHANGE THESE. They will be set automatically in the code.
+    # NUM_ACTORS: int = -1
+    # NUM_UPDATES: int = -1
+    # MINIBATCH_SIZE: int = -1
     _num_actors: int = -1
     _minibatch_size: int = -1
     _num_updates: int = -1
